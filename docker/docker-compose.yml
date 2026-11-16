@@ -1,0 +1,131 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ids_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-ai_ids_ips}
+      POSTGRES_USER: ${DB_USER:-ids_admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ids_secure_password_replace_in_prod}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-ids_admin} -d ${DB_NAME:-ai_ids_ips}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ids_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: ids_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ids_net
+
+  web-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    container_name: ids_web_api
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=redis
+    ports:
+      - "5000:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../ml/registry:/app/ml/registry
+    networks:
+      - ids_net
+
+  detection-engine:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.engine
+    container_name: ids_detection_engine
+    restart: unless-stopped
+    command: ["python", "run.py", "detection-engine"]
+    env_file:
+      - ../.env
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=redis
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../ml/registry:/app/ml/registry
+    networks:
+      - ids_net
+
+  prevention-engine:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.engine
+    container_name: ids_prevention_engine
+    restart: unless-stopped
+    command: ["python", "run.py", "prevention-engine"]
+    env_file:
+      - ../.env
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=redis
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ids_net
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: ids_celery_worker
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=redis
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ids_net
+
+volumes:
+  pg_data:
+  redis_data:
+
+networks:
+  ids_net:
+    driver: bridge

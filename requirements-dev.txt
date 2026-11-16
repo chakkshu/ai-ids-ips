@@ -1,0 +1,21 @@
+# AI-IDS/IPS Development & Security Testing Dependencies
+-r requirements.txt
+
+# Testing Frameworks
+pytest>=8.0.0
+pytest-cov>=4.1.0
+pytest-mock>=3.12.0
+
+# Code Quality & Formatters
+ruff>=0.2.1
+black>=24.1.1
+mypy>=1.8.0
+
+# Security Auditing (SAST & Dependency Scanners)
+bandit>=1.7.7
+pip-audit>=2.7.0
+
+# Type Stubs
+types-requests>=2.31.0
+types-psutil>=5.9.5
+types-redis>=4.6.0
