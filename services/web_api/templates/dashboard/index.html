@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{% block title %}SOC Defensive Dashboard - AI-IDS/IPS{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">SOC Defensive Operations Overview</h1>
+        <p class="page-subtitle">Real-time network traffic analysis, ML inference, and automated containment</p>
+    </div>
+    <div style="display: flex; gap: 0.5rem;">
+        <span class="badge badge-benign" style="padding: 6px 12px; font-size: 12px;">Sensor Status: Healthy</span>
+        <span class="badge badge-low" style="padding: 6px 12px; font-size: 12px;">Engine Latency: 2.4ms</span>
+    </div>
+</div>
+
+<!-- SOC High-Level KPI Cards -->
+<div class="kpi-grid">
+    <div class="soc-card kpi-card">
+        <div class="kpi-label">
+            <span>Aggregated Flows</span>
+            <span>📡</span>
+        </div>
+        <div class="kpi-value" id="kpi-total-flows">{{ stats.total_flows | default(0) }}</div>
+        <div class="kpi-trend positive">
+            <span>&bull; Bidirectional 5-tuple monitoring</span>
+        </div>
+    </div>
+
+    <div class="soc-card kpi-card">
+        <div class="kpi-label">
+            <span>Malicious Detections</span>
+            <span>🎯</span>
+        </div>
+        <div class="kpi-value" style="color: var(--color-critical);" id="kpi-malicious-count">{{ stats.malicious_detections | default(0) }}</div>
+        <div class="kpi-trend negative">
+            <span>&bull; Random Forest Classifications</span>
+        </div>
+    </div>
+
+    <div class="soc-card kpi-card">
+        <div class="kpi-label">
+            <span>Active Incidents</span>
+            <span>🚨</span>
+        </div>
+        <div class="kpi-value" style="color: var(--color-warning);" id="kpi-active-alerts">{{ stats.active_alerts | default(0) }}</div>
+        <div class="kpi-trend neutral">
+            <span>&bull; Triaged / Acknowledged</span>
+        </div>
+    </div>
+
+    <div class="soc-card kpi-card">
+        <div class="kpi-label">
+            <span>Contained / Blocked IPs</span>
+            <span>⛔</span>
+        </div>
+        <div class="kpi-value" style="color: var(--color-purple);" id="kpi-blocked-ips">{{ stats.blocked_ips | default(0) }}</div>
+        <div class="kpi-trend neutral">
+            <span>&bull; Dry-Run Firewall Emulation</span>
+        </div>
+    </div>
+</div>
+
+<!-- Incident Table Preview -->
+<div class="soc-card" style="margin-bottom: 1.5rem;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h2 style="font-size: 15px; font-weight: 600;">Recent Security Alerts & Detections</h2>
+        <span style="font-size: 12px; color: var(--text-muted);">Auto-refreshed via WebSocket</span>
+    </div>
+
+    <div class="soc-table-wrapper">
+        <table class="soc-table">
+            <thead>
+                <tr>
+                    <th>Timestamp (UTC)</th>
+                    <th>Source IP</th>
+                    <th>Target Port</th>
+                    <th>Attack Category</th>
+                    <th>Confidence</th>
+                    <th>Severity</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if recent_alerts %}
+                    {% for alert in recent_alerts %}
+                    <tr>
+                        <td style="font-family: var(--font-mono);">{{ alert.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                        <td style="font-family: var(--font-mono); font-weight: 500;">{{ alert.src_ip }}</td>
+                        <td>{{ alert.dst_port }}</td>
+                        <td><span style="font-weight: 600;">{{ alert.attack_type }}</span></td>
+                        <td style="font-family: var(--font-mono);">{{ "%.2f"|format(alert.detection.confidence_score if alert.detection else 0.95) }}</td>
+                        <td><span class="badge badge-{{ alert.severity.value }}">{{ alert.severity.value }}</span></td>
+                        <td><span class="status-tag" style="padding: 2px 8px; font-size: 11px;">{{ alert.status.value }}</span></td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+                            No active security alerts recorded. Ingestion stream normal.
+                        </td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

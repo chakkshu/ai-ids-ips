@@ -48,7 +48,12 @@ def get_engine(db_url: str | None = None, echo: bool = False):
 
 # Global Engine and Session Factory instances
 engine = get_engine()
-SessionFactory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+SessionFactory = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+    expire_on_commit=False,  # Keep loaded attributes accessible after transaction commit
+)
 ScopedSession = scoped_session(SessionFactory)
 
 

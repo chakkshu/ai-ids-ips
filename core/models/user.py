@@ -10,6 +10,7 @@ import enum
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from flask_login import UserMixin
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -26,10 +27,14 @@ class UserRole(str, enum.Enum):
     VIEWER = "viewer"
 
 
-class User(Base):
+class User(Base, UserMixin):
     """User account entity storing credentials, role, 2FA status, and lockout counters."""
 
     __tablename__ = "users"
+
+    def get_id(self) -> str:
+        """Return the user ID string for Flask-Login session management."""
+        return str(self.id)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)

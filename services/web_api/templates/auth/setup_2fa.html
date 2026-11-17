@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}Configure Two-Factor Authentication - AI-IDS/IPS{% endblock %}
+
+{% block content %}
+<div style="max-width: 600px; margin: 0 auto;">
+    <div class="page-header">
+        <div>
+            <h1 class="page-title">Two-Factor Authentication Setup</h1>
+            <p class="page-subtitle">Enhance console account security using RFC 6238 TOTP authenticators</p>
+        </div>
+    </div>
+
+    <div class="soc-card">
+        <div style="text-align: center; margin-bottom: 1.5rem;">
+            <div style="display: inline-block; padding: 1rem; background-color: #fff; border-radius: var(--radius); margin-bottom: 1rem;">
+                <img src="{{ qr_code_data }}" alt="2FA QR Code" style="width: 200px; height: 200px; display: block;">
+            </div>
+            <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 0.5rem;">
+                Scan this QR code with Google Authenticator, Aegis, 1Password, or Authy.
+            </div>
+            <div style="background-color: var(--bg-dark); padding: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border-color); font-family: var(--font-mono); font-size: 13px; display: inline-flex; align-items: center; gap: 8px;">
+                <span>{{ secret }}</span>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="copyToClipboard('{{ secret }}', this)">Copy</button>
+            </div>
+        </div>
+
+        <form method="POST" action="{{ url_for('auth.setup_2fa') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="secret" value="{{ secret }}">
+
+            <div class="form-group">
+                <label class="form-label" for="code" style="text-align: center;">Verify 6-Digit Code from App</label>
+                <input type="text" id="code" name="code" class="form-control code-input" maxlength="6" pattern="[0-9]{6}" required autofocus placeholder="000000">
+            </div>
+
+            <button type="submit" class="btn btn-primary" style="width: 100%; padding: 0.75rem;">
+                Activate & Enforce 2FA
+            </button>
+        </form>
+    </div>
+</div>
+{% endblock %}

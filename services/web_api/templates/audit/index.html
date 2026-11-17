@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Tamper-Evident Audit Ledger - AI-IDS/IPS{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Tamper-Evident Audit Ledger</h1>
+        <p class="page-subtitle">HMAC-SHA256 cryptographically chained immutable forensic trail</p>
+    </div>
+    <div>
+        <form method="POST" action="{{ url_for('audit.verify') }}" style="display: inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-primary btn-sm">
+                <span>🔐</span> Verify Ledger Integrity
+            </button>
+        </form>
+    </div>
+</div>
+
+<div class="soc-card">
+    <div class="soc-table-wrapper">
+        <table class="soc-table">
+            <thead>
+                <tr>
+                    <th>Entry ID</th>
+                    <th>Timestamp (UTC)</th>
+                    <th>User</th>
+                    <th>Action</th>
+                    <th>Resource</th>
+                    <th>Status</th>
+                    <th>HMAC-SHA256 Entry Hash</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if logs %}
+                    {% for log in logs %}
+                    <tr>
+                        <td style="font-family: var(--font-mono);">#{{ log.id }}</td>
+                        <td style="font-family: var(--font-mono); font-size: 12px;">{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] }}</td>
+                        <td>
+                            <div style="font-weight: 600;">{{ log.username }}</div>
+                            <div style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);">{{ log.ip_address or 'internal' }}</div>
+                        </td>
+                        <td><span style="font-weight: 600; color: var(--color-info);">{{ log.action }}</span></td>
+                        <td>
+                            <span class="badge" style="background-color: var(--border-color); color: var(--text-main);">{{ log.resource_type }}</span>
+                            {% if log.resource_id %}
+                            <span style="font-size: 11px; font-family: var(--font-mono); color: var(--text-dim);">:{{ log.resource_id }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if log.status == 'SUCCESS' %}
+                            <span class="badge badge-benign">SUCCESS</span>
+                            {% else %}
+                            <span class="badge badge-critical">{{ log.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);" title="{{ log.entry_hash }}">
+                            {{ log.entry_hash[:12] }}...{{ log.entry_hash[-12:] }}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+                            No audit log entries recorded.
+                        </td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

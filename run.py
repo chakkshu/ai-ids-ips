@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import UTC, datetime
 
 from core.config import settings
 from core.logging import get_logger, setup_logging

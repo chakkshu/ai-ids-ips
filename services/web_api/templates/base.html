@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() if csrf_token else '' }}">
+    <title>{% block title %}AI-IDS/IPS Enterprise Defensive Console{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/soc-theme.css') }}">
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <div class="app-container">
+        <!-- Collapsible Navigation Sidebar -->
+        <aside class="soc-sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="brand-icon">🛡️</div>
+                <div>
+                    <div class="brand-title">AI-IDS / IPS</div>
+                </div>
+                <span class="brand-badge">SOC v1.0</span>
+            </div>
+
+            <nav class="sidebar-nav">
+                <div class="nav-section-title">Telemetry & Detection</div>
+                <a href="{{ url_for('dashboard.index') }}" class="nav-link {% if request.endpoint == 'dashboard.index' %}active{% endif %}">
+                    <span class="nav-icon">📊</span> Dashboard
+                </a>
+                <a href="#" class="nav-link">
+                    <span class="nav-icon">📡</span> Live Traffic
+                </a>
+                <a href="#" class="nav-link">
+                    <span class="nav-link-icon">🎯</span> Detections
+                </a>
+                <a href="#" class="nav-link">
+                    <span class="nav-icon">🚨</span> Alerts Workflow
+                </a>
+                <a href="#" class="nav-link">
+                    <span class="nav-icon">📜</span> Attack History
+                </a>
+
+                <div class="nav-section-title">Automated Prevention</div>
+                <a href="#" class="nav-link">
+                    <span class="nav-icon">⛔</span> Blocked IPs & Whitelist
+                </a>
+                <a href="#" class="nav-link">
+                    <span class="nav-icon">⚙️</span> Prevention Policy
+                </a>
+                <a href="#" class="nav-link">
+                    <span class="nav-icon">🌐</span> Threat Intelligence
+                </a>
+
+                <div class="nav-section-title">Intelligence & System</div>
+                <a href="#" class="nav-link">
+                    <span class="nav-icon">💻</span> Host / Process Monitor
+                </a>
+                <a href="#" class="nav-link">
+                    <span class="nav-icon">🧠</span> ML Models & Drift
+                </a>
+                <a href="{{ url_for('audit.index') }}" class="nav-link {% if request.endpoint == 'audit.index' %}active{% endif %}">
+                    <span class="nav-icon">🔒</span> Tamper-Evident Audit
+                </a>
+                <a href="#" class="nav-link">
+                    <span class="nav-icon">📑</span> Compliance Reports
+                </a>
+
+                {% if current_user.is_authenticated and current_user.role.value == 'admin' %}
+                <div class="nav-section-title">Administration</div>
+                <a href="{{ url_for('users.index') }}" class="nav-link {% if request.endpoint == 'users.index' %}active{% endif %}">
+                    <span class="nav-icon">👥</span> User Management
+                </a>
+                {% endif %}
+                <a href="#" class="nav-link">
+                    <span class="nav-icon">🏥</span> System Health
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div>DEFENSIVE TOOL ONLY</div>
+                <div style="font-size: 11px; margin-top: 2px;">Correlation: <span style="font-family: var(--font-mono);">{{ g.correlation_id[:8] if g.correlation_id else 'system' }}</span></div>
+            </div>
+        </aside>
+
+        <!-- Main Workspace -->
+        <div class="main-wrapper">
+            <!-- Top Status Bar -->
+            <header class="soc-header">
+                <div class="header-status-pills">
+                    <div class="status-tag">
+                        <span class="pulse-indicator"></span>
+                        <span>Mode: <strong>DRY-RUN</strong></span>
+                    </div>
+                    <div class="status-tag">
+                        <span>Simulator: <strong>READY</strong></span>
+                    </div>
+                    <div class="status-tag" style="color: var(--text-muted);">
+                        <span id="utc-clock">2026-11-17 00:00:00 UTC</span>
+                    </div>
+                </div>
+
+                <div class="header-user-actions">
+                    {% if current_user.is_authenticated %}
+                    <div class="user-profile-badge">
+                        <span style="font-weight: 500;">{{ current_user.username }}</span>
+                        <span class="role-badge {{ current_user.role.value }}">{{ current_user.role.value }}</span>
+                        {% if current_user.is_totp_enabled %}
+                        <span class="badge badge-benign" title="2FA Active">2FA ON</span>
+                        {% else %}
+                        <a href="{{ url_for('auth.setup_2fa') }}" class="badge badge-medium" style="text-decoration: none;" title="Enable 2FA">2FA OFF</a>
+                        {% endif %}
+                    </div>
+                    <a href="{{ url_for('auth.logout') }}" class="btn btn-secondary btn-sm">Sign Out</a>
+                    {% else %}
+                    <a href="{{ url_for('auth.login') }}" class="btn btn-primary btn-sm">Sign In</a>
+                    {% endif %}
+                </div>
+            </header>
+
+            <!-- Page Container -->
+            <main class="page-container">
+                <!-- Flash Alerts -->
+                <div class="flash-container">
+                    {% with messages = get_flashed_messages(with_categories=true) %}
+                        {% if messages %}
+                            {% for category, message in messages %}
+                                <div class="flash-alert {{ category }}">
+                                    <span>{{ message }}</span>
+                                    <button class="flash-close" aria-label="Close">&times;</button>
+                                </div>
+                            {% endfor %}
+                        {% endif %}
+                    {% endwith %}
+                </div>
+
+                {% block content %}{% endblock %}
+            </main>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    {% block extra_scripts %}{% endblock %}
+</body>
+</html>
