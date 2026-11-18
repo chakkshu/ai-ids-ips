@@ -90,42 +90,66 @@ The staged smoke artifacts live only under a temporary directory; no `.joblib` f
 
 ---
 
-## 3. Unverified items
+## 3. Verification status (Verified / Written but unverified / Skipped)
 
-These were **not** executed locally and are not claimed as verified:
-
-- Training or evaluation on real CICIDS2017 CSVs. `data/raw/` contains no CSV files; all reported metrics come from the synthetic fixture.
-- PostgreSQL 16 Alembic up/down and the opt-in `tests/integration/test_ml_postgres.py` registry lifecycle test. CI is configured for both, but no local PostgreSQL container was started for this report.
-- GitHub Actions execution of the updated workflow.
-- `pip-audit` dependency vulnerability scan (Bandit SAST was run; `pip-audit` was not).
-- Live Redis, the full compose stack, production TLS/proxy termination, and multi-worker behaviour.
-- Load, performance, concurrency, and end-to-end latency testing. The throughput figure above is from 28 synthetic rows.
-- Browser end-to-end tests and automated accessibility auditing (carried over from Phase 2).
-- Real sensor/flow-meter integration; the future flow meter must emit the 78 pinned features in exact order.
-- SHAP-based explanations (intentionally disabled; the cheap importance method is used instead).
-
----
-
-## 4. Pending items
-
-1. Review and approve this Phase 3 report.
-2. Commit the Phase 3 changes on `phase-3-ml` (nothing is committed yet).
-3. Apply migration `0003_phase3_ml_registry` to `ids_dev.sqlite3` (`alembic upgrade head`) before using `registry-list`, `registry-promote`, or `registry-rollback` against the dev database.
-4. Obtain real CICIDS2017 data, run `check-dataset` → `preprocess` → `train` → `evaluate`, and only then promote a version with an existing admin `--actor-id`.
-5. Run the CI workflow (including the PostgreSQL registry integration test) on GitHub.
-6. Run `pip-audit` and address any findings.
-7. Carried over from Phase 2: optionally add Playwright + axe checks and remove the obsolete `version:` key from `docker/docker-compose.yml`.
+| Status | Item | Evidence / result |
+|---|---|---|
+| **Verified** | Phase 2 commit and 2FA enrollment fix merged | `master` commit `8eb43cc` contains the stable pending-secret fix and `TestTotpEnrollmentHttpFlow`; fast-forward merged into `phase-3-ml` |
+| **Verified** | All Phase 3 work committed | `phase-3-ml` commit `505f560` (26 files, +4,547 lines); `git status --short --branch` clean |
+| **Verified** | Static gates | Ruff `All checks passed!`; Black 65 files unchanged; mypy 45 files (Makefile scope) / 29 files (CI scope) clean; Bandit 6,021 lines, no reported issues |
+| **Verified** | Random-order pytest on SQLite | `--randomly-seed=12345`: 151 passed, 1 skipped; `--randomly-seed=98765`: 151 passed, 1 skipped |
+| **Verified** | Dependency audit | `pip-audit` → `No known vulnerabilities found` |
+| **Verified** | PostgreSQL 16 migrations | Docker Compose `db` service, PostgreSQL 16.16; `0003_phase3_ml_registry` upgrade → current → downgrade → upgrade, all exit 0 |
+| **Verified** | PostgreSQL 16 test suite | `AI_IDS_TEST_DATABASE_URL` set: **152 passed, 0 skipped**; `test_registry_lifecycle_on_postgres` PASSED |
+| **Verified** | Fresh dev database | `ids_dev.sqlite3` deleted, migrated to `0003... (head)`, `seed-db` OK, `registry-list` → `[]`, `verify-audit-chain` → 1/1 entries valid |
+| **Verified** | Named ML/registry tests | All 8 node IDs in §4 passed in one targeted run |
+| **Written but unverified** | Live Redis-backed rate limiting | Production selects Redis; tests use `memory://`; no Redis load test |
+| **Written but unverified** | Full application compose stack | Only the `db` service was started; web/worker/engines were not exercised |
+| **Written but unverified** | Production TLS, reverse proxy, HSTS | Headers and `ProxyFix` implemented and unit-checked; not tested behind a real load balancer |
+| **Written but unverified** | GitHub Actions workflow | CI YAML updated; workflow not executed locally |
+| **Skipped** | Real CICIDS2017 training/evaluation | No CSVs in `data/raw/`; dataset step not started; metrics are synthetic only |
+| **Skipped** | Browser E2E and automated accessibility | Not implemented for Phase 3 |
+| **Skipped** | SHAP explanations | Disabled by design; the cheap importance method is used instead |
+| **Skipped** | Real sensor/flow-meter integration | Future work; the 78-feature contract is documented |
+| **Skipped** | Load, concurrency, and latency testing | Throughput figure derived from 28 synthetic rows only |
+| **Skipped** | Phase 4 work | Not started |
 
 ---
 
-## 5. Risks and notes
+## 4. Named test coverage
+
+All of the following were run by node ID in one command: `8 passed in 25.20s`.
+
+| Behavior | Test |
+|---|---|
+| Tampered artifact refusing to load | `tests/unit/ml/test_predict.py::test_checksum_failure_refuses_before_joblib_load` and `tests/unit/ml/test_registry.py::test_tampered_artifact_refuses_verification` |
+| Path traversal rejection | `tests/unit/ml/test_registry.py::test_path_traversal_and_invalid_names_rejected` |
+| Staged model never auto-activating | `tests/unit/ml/test_registry.py::test_staged_version_is_not_active` |
+| Promote/rollback writing audit entries | `tests/unit/ml/test_registry.py::test_promote_rollback_audit_and_rbac` (asserts `MODEL_PROMOTED` and `MODEL_ROLLED_BACK`); PostgreSQL confirmation in `tests/integration/test_ml_postgres.py::test_registry_lifecycle_on_postgres` |
+| Scaler fitted on train only | `tests/unit/ml/test_preprocess.py::test_scaler_is_fitted_on_training_rows_only` |
+| Resampling on train only | `tests/unit/ml/test_train_evaluate_smoke.py::test_smote_resamples_training_split_only` |
+| Feature order enforcement | `tests/unit/ml/test_predict.py::test_feature_order_and_contract_enforcement` |
+
+---
+
+## 5. Pending items
+
+1. Review and approve this report (including the verification table added after the initial commit).
+2. Add real CICIDS2017 CSVs and run the dataset step (`check-dataset` → `preprocess` → `train` → `evaluate`); promote only with an existing admin `--actor-id`.
+3. Run the CI workflow on GitHub to verify the updated YAML end to end.
+4. Exercise live Redis rate limiting and the full compose stack.
+5. Carried over from Phase 2: optionally add Playwright + axe checks and remove the obsolete `version:` key from `docker/docker-compose.yml`.
+
+---
+
+## 6. Risks and notes
 
 - **No deployable model exists.** There are no real-data metrics, no artifacts in `ml/models/`, and no active registry version. The synthetic smoke accuracy is a pipeline correctness signal only.
-- **Stale dev database.** `ids_dev.sqlite3` predates migration `0003`; registry CLI commands that query `ModelArtifact` fail until the migration is applied. Tests and the migration check used isolated databases, so this did not affect the test result.
 - **Checksums are integrity checks, not signatures.** `checksums.json` is verified against the artifacts, but an attacker with write access to the registry could replace both. Registry directory permissions and OS access control are part of the trust boundary; Windows ACLs are left to the OS.
 - **Pickle deserialization.** Artifacts are joblib pickles. Checksum verification happens before loading, but the pipeline must only load artifacts it produced and sealed.
 - **Port and lab bias.** `Destination Port` is included and pinned in the feature contract; the model can learn lab service-to-attack mappings. CICFlowMeter-derived features will not be bit-identical to a custom flow meter, so thresholds and drift baselines must be revalidated.
 - **Rare-class instability.** Low-support classes are flagged and their metrics should not be trusted independently. The smoke run flagged every class as low support.
-- **Database portability.** SQLite was used for fast local tests and migration checks. PostgreSQL is configured in CI but was not exercised locally for Phase 3.
-- **Test warnings.** The suite emitted `ResourceWarning`s about unclosed SQLite connections in existing Phase 1 tests; these are not failures but should be cleaned up.
+- **Database portability.** SQLite is used for fast local tests; PostgreSQL 16 was exercised locally for migrations and the full suite (152 passed, 0 skipped) as well as in CI configuration.
+- **Dev database recreated.** The old `ids_dev.sqlite3` was deleted and rebuilt from migrations `0001` → `0003` plus `seed-db`; `registry-list` and `verify-audit-chain` both work. The PostgreSQL volume needed a one-time `DROP SCHEMA public CASCADE` because leftover enum types from an earlier session blocked `0001`.
+- **Test warnings.** The SQLite suite emitted `ResourceWarning`s about unclosed SQLite connections in existing Phase 1 tests; these are not failures but should be cleaned up.
 - **Formatting footprint.** Black reports the whole tree clean (65 files); Phase 3 added new modules and tests without reformatting unrelated code.
