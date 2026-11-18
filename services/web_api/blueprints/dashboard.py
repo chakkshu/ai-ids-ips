@@ -1,19 +1,20 @@
 """SOC Operations Dashboard Blueprint.
 
 Renders real-time overview metrics, sensor statuses, and recent detection feeds.
+Access is governed by the explicit permission matrix (``dashboard:view``).
 """
 
 from __future__ import annotations
 
 from flask import Blueprint, redirect, render_template, url_for
-from flask_login import login_required
 
 from core.db import get_db_session
 from core.models.alert import Alert
 from core.models.detection import Detection
 from core.models.network import NetworkFlow
 from core.models.prevention import BlockedIP, BlockStatus
-from core.security import require_2fa_verification, require_password_change
+from core.rbac import Permission
+from core.security import permission_required
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
@@ -25,22 +26,23 @@ def root():
 
 
 @dashboard_bp.route("/dashboard")
-@login_required
-@require_password_change
-@require_2fa_verification
+@permission_required(Permission.DASHBOARD_VIEW)
 def index():
     """Render the central SOC operations dashboard."""
     with get_db_session() as db_session:
         total_flows = db_session.query(NetworkFlow).count()
-        malicious_count = db_session.query(Detection).filter_by(is_malicious=True).count()
-        active_alerts = db_session.query(Alert).filter(Alert.status != "resolved").count()
-        blocked_ips_count = db_session.query(BlockedIP).filter_by(status=BlockStatus.ACTIVE).count()
+        malicious_count = (
+            db_session.query(Detection).filter_by(is_malicious=True).count()
+        )
+        active_alerts = (
+            db_session.query(Alert).filter(Alert.status != "resolved").count()
+        )
+        blocked_ips_count = (
+            db_session.query(BlockedIP).filter_by(status=BlockStatus.ACTIVE).count()
+        )
 
         recent_alerts = (
-            db_session.query(Alert)
-            .order_by(Alert.created_at.desc())
-            .limit(10)
-            .all()
+            db_session.query(Alert).order_by(Alert.created_at.desc()).limit(10).all()
         )
 
         stats = {

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Request Error{% endblock %} - AI-IDS/IPS</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/soc-theme.css') }}">
+</head>
+<body class="auth-body">
+    <main class="auth-wrapper" id="main-content">
+        <div class="auth-card error-card">
+            <div class="auth-header">
+                <div class="auth-icon" aria-hidden="true">{% block symbol %}⚠️{% endblock %}</div>
+                <h1>{% block heading %}Request could not be completed{% endblock %}</h1>
+                <p class="error-code">{% block code %}{% endblock %}</p>
+            </div>
+            <p class="error-message">{% block message %}An unexpected condition occurred.{% endblock %}</p>
+            <div class="action-row action-row-center">
+                <a href="{{ url_for('dashboard.index') }}" class="btn btn-primary">Return to Dashboard</a>
+                {% if not current_user.is_authenticated %}
+                <a href="{{ url_for('auth.login') }}" class="btn btn-secondary">Sign In</a>
+                {% endif %}
+            </div>
+        </div>
+    </main>
+</body>
+</html>

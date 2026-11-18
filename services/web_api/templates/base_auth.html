@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>{% block title %}AI-IDS/IPS Secure Access{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/soc-theme.css') }}">
+    {% block extra_head %}{% endblock %}
+</head>
+<body class="auth-body">
+    <main class="auth-wrapper" id="main-content">
+        <div class="auth-card {% block card_class %}{% endblock %}">
+            <div class="auth-header">
+                <div class="auth-icon" aria-hidden="true">{% block auth_icon %}🛡️{% endblock %}</div>
+                <h1>{% block auth_title %}Security Operations Sign In{% endblock %}</h1>
+                <p>{% block auth_subtitle %}AI-Powered Intrusion Detection &amp; Prevention{% endblock %}</p>
+            </div>
+
+            {% include "partials/_flash.html" %}
+
+            {% block content %}{% endblock %}
+
+            <div class="auth-footer">
+                DEFENSIVE CYBERSECURITY SYSTEM &bull; AUTHORIZED PERSONNEL ONLY
+            </div>
+        </div>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}" nonce="{{ csp_nonce }}" defer></script>
+    {% block extra_scripts %}{% endblock %}
+</body>
+</html>

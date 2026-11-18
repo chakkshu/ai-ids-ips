@@ -1,0 +1,6 @@
+{% extends "errors/base_error.html" %}
+{% block title %}Bad Request{% endblock %}
+{% block symbol %}🛡️{% endblock %}
+{% block heading %}Request validation failed{% endblock %}
+{% block code %}400{% endblock %}
+{% block message %}{{ reason or "The request could not be validated. Refresh the page and try again." }}{% endblock %}

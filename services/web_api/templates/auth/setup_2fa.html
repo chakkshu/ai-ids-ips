@@ -3,41 +3,59 @@
 {% block title %}Configure Two-Factor Authentication - AI-IDS/IPS{% endblock %}
 
 {% block content %}
-<div style="max-width: 600px; margin: 0 auto;">
-    <div class="page-header">
-        <div>
-            <h1 class="page-title">Two-Factor Authentication Setup</h1>
-            <p class="page-subtitle">Enhance console account security using RFC 6238 TOTP authenticators</p>
-        </div>
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Two-Factor Authentication</h1>
+        <p class="page-subtitle">Protect your console account with an RFC 6238 TOTP authenticator</p>
     </div>
+</div>
 
+<div class="content-narrow">
     <div class="soc-card">
-        <div style="text-align: center; margin-bottom: 1.5rem;">
-            <div style="display: inline-block; padding: 1rem; background-color: #fff; border-radius: var(--radius); margin-bottom: 1rem;">
-                <img src="{{ qr_code_data }}" alt="2FA QR Code" style="width: 200px; height: 200px; display: block;">
-            </div>
-            <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 0.5rem;">
-                Scan this QR code with Google Authenticator, Aegis, 1Password, or Authy.
-            </div>
-            <div style="background-color: var(--bg-dark); padding: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border-color); font-family: var(--font-mono); font-size: 13px; display: inline-flex; align-items: center; gap: 8px;">
-                <span>{{ secret }}</span>
-                <button type="button" class="btn btn-secondary btn-sm" onclick="copyToClipboard('{{ secret }}', this)">Copy</button>
-            </div>
-        </div>
-
-        <form method="POST" action="{{ url_for('auth.setup_2fa') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="secret" value="{{ secret }}">
-
-            <div class="form-group">
-                <label class="form-label" for="code" style="text-align: center;">Verify 6-Digit Code from App</label>
-                <input type="text" id="code" name="code" class="form-control code-input" maxlength="6" pattern="[0-9]{6}" required autofocus placeholder="000000">
+        {% if enabled %}
+            <div class="callout callout-success">
+                <strong>Two-factor authentication is enabled.</strong>
+                <p>Your account requires a valid authenticator code or a one-time recovery code at each sign-in.</p>
             </div>
 
-            <button type="submit" class="btn btn-primary" style="width: 100%; padding: 0.75rem;">
-                Activate & Enforce 2FA
-            </button>
-        </form>
+            <h2 class="card-title">Regenerate Recovery Codes</h2>
+            <p class="text-muted">
+                Generating new recovery codes immediately invalidates every existing code.
+                You will be asked to confirm your current password.
+            </p>
+
+            <form method="POST" action="{{ url_for('auth.regenerate_recovery_codes') }}" class="auth-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label class="form-label" for="regenerate_password">Current Password</label>
+                    <input type="password" id="regenerate_password" name="current_password" class="form-control" required autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn btn-secondary">Regenerate Recovery Codes</button>
+            </form>
+        {% else %}
+            <h2 class="card-title">Scan the QR Code</h2>
+            <div class="qr-panel">
+                <div class="qr-frame">
+                    <img src="{{ qr_code_data }}" alt="Two-factor authentication QR code" class="qr-image" width="200" height="200">
+                </div>
+                <p class="text-muted">
+                    Scan with Google Authenticator, Aegis, 1Password, or Authy.
+                </p>
+                <div class="code-pill">
+                    <span class="mono">{{ secret }}</span>
+                    <button type="button" class="btn btn-secondary btn-sm" data-copy="{{ secret }}" data-copy-label="Copy">Copy</button>
+                </div>
+            </div>
+
+            <form method="POST" action="{{ url_for('auth.setup_2fa') }}" class="auth-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label class="form-label" for="code">Verify Code From Authenticator</label>
+                    <input type="text" id="code" name="code" class="form-control code-input" maxlength="6" inputmode="numeric" pattern="[0-9]{6}" required autofocus autocomplete="one-time-code" placeholder="000000">
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">Activate &amp; Enforce 2FA</button>
+            </form>
+        {% endif %}
     </div>
 </div>
 {% endblock %}

@@ -5,17 +5,17 @@ Revises: None
 Create Date: 2026-11-17 00:00:00.000000
 
 """
-from typing import Sequence, Union
 
-from alembic import op
+from collections.abc import Sequence
+
 import sqlalchemy as sa
-
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "0001_initial_schema"
-down_revision: Union[str, None] = None
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -26,7 +26,11 @@ def upgrade() -> None:
         sa.Column("username", sa.String(length=64), nullable=False),
         sa.Column("email", sa.String(length=128), nullable=False),
         sa.Column("password_hash", sa.String(length=255), nullable=False),
-        sa.Column("role", sa.Enum("admin", "analyst", "viewer", name="user_role_enum"), nullable=False),
+        sa.Column(
+            "role",
+            sa.Enum("admin", "analyst", "viewer", name="user_role_enum"),
+            nullable=False,
+        ),
         sa.Column("is_active", sa.Boolean(), nullable=False, default=True),
         sa.Column("must_change_password", sa.Boolean(), nullable=False, default=True),
         sa.Column("totp_secret", sa.String(length=64), nullable=True),
@@ -57,7 +61,12 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_user_sessions_session_token", "user_sessions", ["session_token"], unique=True)
+    op.create_index(
+        "ix_user_sessions_session_token",
+        "user_sessions",
+        ["session_token"],
+        unique=True,
+    )
 
     # 3. API Keys Table
     op.create_table(
@@ -134,8 +143,12 @@ def upgrade() -> None:
     op.create_index("ix_network_flows_src_ip", "network_flows", ["src_ip"])
     op.create_index("ix_network_flows_dst_ip", "network_flows", ["dst_ip"])
     op.create_index("ix_network_flows_dst_port", "network_flows", ["dst_port"])
-    op.create_index("ix_flows_src_dst_proto", "network_flows", ["src_ip", "dst_ip", "protocol"])
-    op.create_index("ix_flows_dst_port_time", "network_flows", ["dst_port", "timestamp"])
+    op.create_index(
+        "ix_flows_src_dst_proto", "network_flows", ["src_ip", "dst_ip", "protocol"]
+    )
+    op.create_index(
+        "ix_flows_dst_port_time", "network_flows", ["dst_port", "timestamp"]
+    )
 
     # 6. Detections Table
     op.create_table(
@@ -159,8 +172,14 @@ def upgrade() -> None:
     op.create_index("ix_detections_predicted_label", "detections", ["predicted_label"])
     op.create_index("ix_detections_is_malicious", "detections", ["is_malicious"])
     op.create_index("ix_detections_model_version", "detections", ["model_version"])
-    op.create_index("ix_detections_malicious_time", "detections", ["is_malicious", "timestamp"])
-    op.create_index("ix_detections_label_conf", "detections", ["predicted_label", "confidence_score"])
+    op.create_index(
+        "ix_detections_malicious_time", "detections", ["is_malicious", "timestamp"]
+    )
+    op.create_index(
+        "ix_detections_label_conf",
+        "detections",
+        ["predicted_label", "confidence_score"],
+    )
 
     # 7. Alerts Table
     op.create_table(
@@ -171,8 +190,23 @@ def upgrade() -> None:
         sa.Column("occurrence_count", sa.Integer(), nullable=False, default=1),
         sa.Column("title", sa.String(length=128), nullable=False),
         sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("severity", sa.Enum("low", "medium", "high", "critical", name="alert_severity_enum"), nullable=False),
-        sa.Column("status", sa.Enum("new", "acknowledged", "investigating", "resolved", "false_positive", name="alert_status_enum"), nullable=False),
+        sa.Column(
+            "severity",
+            sa.Enum("low", "medium", "high", "critical", name="alert_severity_enum"),
+            nullable=False,
+        ),
+        sa.Column(
+            "status",
+            sa.Enum(
+                "new",
+                "acknowledged",
+                "investigating",
+                "resolved",
+                "false_positive",
+                name="alert_status_enum",
+            ),
+            nullable=False,
+        ),
         sa.Column("src_ip", sa.String(length=45), nullable=False),
         sa.Column("dst_ip", sa.String(length=45), nullable=False),
         sa.Column("dst_port", sa.Integer(), nullable=False),
@@ -185,8 +219,12 @@ def upgrade() -> None:
         sa.Column("webhook_dispatched", sa.Boolean(), nullable=False, default=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["detection_id"], ["detections.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["assigned_user_id"], ["users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["detection_id"], ["detections.id"], ondelete="CASCADE"
+        ),
+        sa.ForeignKeyConstraint(
+            ["assigned_user_id"], ["users.id"], ondelete="SET NULL"
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_alerts_detection_id", "alerts", ["detection_id"])
@@ -198,7 +236,9 @@ def upgrade() -> None:
     op.create_index("ix_alerts_attack_type", "alerts", ["attack_type"])
     op.create_index("ix_alerts_assigned_user_id", "alerts", ["assigned_user_id"])
     op.create_index("ix_alerts_created_at", "alerts", ["created_at"])
-    op.create_index("ix_alerts_status_sev_time", "alerts", ["status", "severity", "created_at"])
+    op.create_index(
+        "ix_alerts_status_sev_time", "alerts", ["status", "severity", "created_at"]
+    )
     op.create_index("ix_alerts_src_time", "alerts", ["src_ip", "created_at"])
 
     # 8. Blocked IPs Table
@@ -207,7 +247,17 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("ip_address", sa.String(length=45), nullable=False),
         sa.Column("reason", sa.String(length=255), nullable=False),
-        sa.Column("status", sa.Enum("pending_approval", "active", "expired", "released", name="block_status_enum"), nullable=False),
+        sa.Column(
+            "status",
+            sa.Enum(
+                "pending_approval",
+                "active",
+                "expired",
+                "released",
+                name="block_status_enum",
+            ),
+            nullable=False,
+        ),
         sa.Column("escalation_level", sa.Integer(), nullable=False, default=1),
         sa.Column("blocked_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
@@ -218,9 +268,15 @@ def upgrade() -> None:
         sa.Column("released_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("released_by_user_id", sa.Integer(), nullable=True),
         sa.Column("release_reason", sa.String(length=255), nullable=True),
-        sa.ForeignKeyConstraint(["created_by_user_id"], ["users.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["approved_by_user_id"], ["users.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["released_by_user_id"], ["users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["created_by_user_id"], ["users.id"], ondelete="SET NULL"
+        ),
+        sa.ForeignKeyConstraint(
+            ["approved_by_user_id"], ["users.id"], ondelete="SET NULL"
+        ),
+        sa.ForeignKeyConstraint(
+            ["released_by_user_id"], ["users.id"], ondelete="SET NULL"
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_blocked_ips_ip_address", "blocked_ips", ["ip_address"])
@@ -238,7 +294,9 @@ def upgrade() -> None:
         sa.Column("is_immutable", sa.Boolean(), nullable=False, default=False),
         sa.Column("created_by_user_id", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["created_by_user_id"], ["users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["created_by_user_id"], ["users.id"], ondelete="SET NULL"
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_whitelist_cidr", "whitelist", ["cidr"], unique=True)
@@ -248,7 +306,12 @@ def upgrade() -> None:
         "model_artifacts",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("version", sa.String(length=32), nullable=False),
-        sa.Column("algorithm", sa.String(length=64), nullable=False, default="RandomForestClassifier"),
+        sa.Column(
+            "algorithm",
+            sa.String(length=64),
+            nullable=False,
+            default="RandomForestClassifier",
+        ),
         sa.Column("model_path", sa.String(length=255), nullable=False),
         sa.Column("scaler_path", sa.String(length=255), nullable=False),
         sa.Column("encoder_path", sa.String(length=255), nullable=False),
@@ -262,7 +325,9 @@ def upgrade() -> None:
         sa.Column("activated_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_model_artifacts_version", "model_artifacts", ["version"], unique=True)
+    op.create_index(
+        "ix_model_artifacts_version", "model_artifacts", ["version"], unique=True
+    )
     op.create_index("ix_model_artifacts_is_active", "model_artifacts", ["is_active"])
 
     # 11. Drift Metrics Table
@@ -279,8 +344,12 @@ def upgrade() -> None:
         sa.Column("evaluated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_drift_metrics_model_version", "drift_metrics", ["model_version"])
-    op.create_index("ix_drift_metrics_drift_detected", "drift_metrics", ["drift_detected"])
+    op.create_index(
+        "ix_drift_metrics_model_version", "drift_metrics", ["model_version"]
+    )
+    op.create_index(
+        "ix_drift_metrics_drift_detected", "drift_metrics", ["drift_detected"]
+    )
     op.create_index("ix_drift_metrics_evaluated_at", "drift_metrics", ["evaluated_at"])
 
     # 12. Analyst Feedback Table
@@ -294,11 +363,15 @@ def upgrade() -> None:
         sa.Column("analyst_notes", sa.Text(), nullable=True),
         sa.Column("used_in_retraining", sa.Boolean(), nullable=False, default=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["detection_id"], ["detections.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["detection_id"], ["detections.id"], ondelete="CASCADE"
+        ),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_analyst_feedback_detection_id", "analyst_feedback", ["detection_id"])
+    op.create_index(
+        "ix_analyst_feedback_detection_id", "analyst_feedback", ["detection_id"]
+    )
     op.create_index("ix_analyst_feedback_user_id", "analyst_feedback", ["user_id"])
 
 
@@ -315,7 +388,13 @@ def downgrade() -> None:
     op.drop_table("api_keys")
     op.drop_table("user_sessions")
     op.drop_table("users")
-    op.execute("DROP TYPE IF EXISTS user_role_enum")
-    op.execute("DROP TYPE IF EXISTS alert_severity_enum")
-    op.execute("DROP TYPE IF EXISTS alert_status_enum")
-    op.execute("DROP TYPE IF EXISTS block_status_enum")
+    # Native enum types only exist on PostgreSQL; SQLite stores enums as CHECK
+    # constraints on the table, so there is nothing to drop there.
+    if op.get_bind().dialect.name == "postgresql":
+        for enum_name in (
+            "user_role_enum",
+            "alert_severity_enum",
+            "alert_status_enum",
+            "block_status_enum",
+        ):
+            op.execute(f"DROP TYPE IF EXISTS {enum_name}")

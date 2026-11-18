@@ -1,5 +1,5 @@
 # AI-IDS/IPS Enterprise Makefile
-.PHONY: help install install-dev lint format test test-cov security-audit docker-up docker-down run-api run-sensor run-detection run-prevention run-worker run-simulator migrate seed clean
+.PHONY: help install install-dev lint format test test-cov security-audit docker-up docker-down run-api run-sensor run-detection run-prevention run-worker run-simulator migrate seed clean check-dataset preprocess train smoke-test evaluate registry-list registry-promote registry-rollback
 
 PYTHON ?= python
 PIP ?= pip
@@ -25,6 +25,14 @@ help:
 	@echo "  make migrate         Apply database migrations via Alembic"
 	@echo "  make seed            Seed initial administrator and default policies"
 	@echo "  make clean           Clean cache and temporary test files"
+	@echo "  make check-dataset   Read-only CICIDS2017 readiness check"
+	@echo "  make preprocess      Clean and split CSVs (use ARGS='--output-dir ...')"
+	@echo "  make train           Train and stage a model from a processed bundle"
+	@echo "  make smoke-test      End-to-end training on synthetic test fixtures only"
+	@echo "  make evaluate        Evaluate a staged model on the held-out test split"
+	@echo "  make registry-list   List model artifact versions and statuses"
+	@echo "  make registry-promote   Admin-only promotion (ARGS='--version ... --actor-id 1')"
+	@echo "  make registry-rollback  Admin-only rollback (ARGS='--actor-id 1')"
 
 install:
 	$(PIP) install -r requirements.txt
@@ -84,3 +92,27 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 	rm -rf .pytest_cache htmlcov .coverage
+
+check-dataset:
+	$(PYTHON) run.py check-dataset $(ARGS)
+
+preprocess:
+	$(PYTHON) run.py preprocess $(ARGS)
+
+train:
+	$(PYTHON) run.py train $(ARGS)
+
+smoke-test:
+	$(PYTHON) run.py smoke-test $(ARGS)
+
+evaluate:
+	$(PYTHON) run.py evaluate $(ARGS)
+
+registry-list:
+	$(PYTHON) run.py registry-list $(ARGS)
+
+registry-promote:
+	$(PYTHON) run.py registry-promote $(ARGS)
+
+registry-rollback:
+	$(PYTHON) run.py registry-rollback $(ARGS)

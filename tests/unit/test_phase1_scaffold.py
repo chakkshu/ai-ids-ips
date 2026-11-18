@@ -69,7 +69,9 @@ class TestConfiguration:
             Settings(APP_MASTER_KEK="z" * 64)
 
     def test_whitelist_parsing(self):
-        s = Settings(PREVENTION_WHITELIST="127.0.0.1/32, 10.0.0.0/8, 192.168.1.1/32, invalid_cidr")
+        s = Settings(
+            PREVENTION_WHITELIST="127.0.0.1/32, 10.0.0.0/8, 192.168.1.1/32, invalid_cidr"
+        )
         parsed = s.get_parsed_whitelist()
         assert len(parsed) == 3
         cidrs = [str(net) for net in parsed]
@@ -139,7 +141,9 @@ class TestStructuredLogging:
         record.extra_data = {"src_ip": "10.0.0.5"}
 
         cef_str = formatter.format(record)
-        assert cef_str.startswith("CEF:0|AI-IDS-IPS|EnterpriseDefense|1.0.0|IDS_SCAN_ALERT|Potential PortScan Detected|6|")
+        assert cef_str.startswith(
+            "CEF:0|AI-IDS-IPS|EnterpriseDefense|1.0.0|IDS_SCAN_ALERT|Potential PortScan Detected|6|"
+        )
         assert "src_ip=10.0.0.5" in cef_str
 
 

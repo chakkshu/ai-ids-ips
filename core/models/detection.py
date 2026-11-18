@@ -46,7 +46,7 @@ class Detection(Base):
         unique=True,
         index=True,
     )
-    
+
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -56,19 +56,23 @@ class Detection(Base):
 
     # Inferred Classifications
     predicted_label: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    is_malicious: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    is_malicious: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True
+    )
     confidence_score: Mapped[float] = mapped_column(Float, nullable=False)
-    
+
     # Anomaly Layer (Isolation Forest)
     is_anomaly: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     anomaly_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
 
     # Explainability & Attribution (Top contributing features stored as JSON)
     top_features_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    
+
     # Telemetry & Governance
     model_version: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    inference_latency_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    inference_latency_ms: Mapped[float] = mapped_column(
+        Float, default=0.0, nullable=False
+    )
 
     # Relationships
     flow: Mapped[NetworkFlow] = relationship("NetworkFlow", back_populates="detection")  # type: ignore

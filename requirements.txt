@@ -23,6 +23,8 @@ numpy>=1.26.3
 pandas>=2.2.0
 joblib>=1.3.2
 scipy>=1.12.0
+imbalanced-learn>=0.12.0
+matplotlib>=3.8.0
 
 # Network Packet Capture & System Telemetry
 scapy>=2.5.0

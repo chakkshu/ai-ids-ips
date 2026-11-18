@@ -36,26 +36,30 @@ class NetworkFlow(Base):
         nullable=False,
         index=True,
     )
-    
+
     flow_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     src_ip: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
     src_port: Mapped[int] = mapped_column(Integer, nullable=False)
     dst_ip: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
     dst_port: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     protocol: Mapped[str] = mapped_column(String(16), nullable=False)  # TCP, UDP, ICMP
-    
+
     # Statistical Flow Summaries
     duration: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     total_fwd_packets: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_bwd_packets: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_fwd_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     total_bwd_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
-    flow_bytes_per_sec: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    flow_packets_per_sec: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    
+    flow_bytes_per_sec: Mapped[float] = mapped_column(
+        Float, default=0.0, nullable=False
+    )
+    flow_packets_per_sec: Mapped[float] = mapped_column(
+        Float, default=0.0, nullable=False
+    )
+
     # Complete 80+ CICFlowMeter feature map (stored as JSON text)
     features_json: Mapped[str] = mapped_column(Text, nullable=False)
-    
+
     # Envelope Encrypted Raw Snippet (AES-256-GCM)
     encrypted_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
     encrypted_dek: Mapped[str | None] = mapped_column(String(255), nullable=True)

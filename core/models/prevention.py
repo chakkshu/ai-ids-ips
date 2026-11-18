@@ -17,10 +17,16 @@ from core.db import Base
 
 class BlockStatus(str, enum.Enum):
     """Lifecycle state of an IP containment block."""
+
     PENDING_APPROVAL = "pending_approval"
     ACTIVE = "active"
     EXPIRED = "expired"
     RELEASED = "released"
+
+
+def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
+    """Persist enum values (lowercase), matching the Alembic schema."""
+    return [member.value for member in enum_cls]
 
 
 class BlockedIP(Base):
@@ -31,14 +37,18 @@ class BlockedIP(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ip_address: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
     reason: Mapped[str] = mapped_column(String(255), nullable=False)
-    
+
     status: Mapped[BlockStatus] = mapped_column(
-        Enum(BlockStatus, name="block_status_enum"),
+        Enum(
+            BlockStatus,
+            name="block_status_enum",
+            values_callable=_enum_values,
+        ),
         default=BlockStatus.ACTIVE,
         nullable=False,
         index=True,
     )
-    
+
     # Escalation & Expiration Tracking
     escalation_level: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     blocked_at: Mapped[datetime] = mapped_column(
@@ -46,12 +56,14 @@ class BlockedIP(Base):
         default=lambda: datetime.now(UTC),
         nullable=False,
     )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
     # Execution Metadata
     is_dry_run: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     firewall_rule_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    
+
     # Approval / Release Workflow
     created_by_user_id: Mapped[int | None] = mapped_column(
         Integer,
@@ -63,7 +75,9 @@ class BlockedIP(Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     released_by_user_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -86,10 +100,14 @@ class Whitelist(Base):
     __tablename__ = "whitelist"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    cidr: Mapped[str] = mapped_column(String(45), unique=True, nullable=False, index=True)
+    cidr: Mapped[str] = mapped_column(
+        String(45), unique=True, nullable=False, index=True
+    )
     description: Mapped[str] = mapped_column(String(255), nullable=False)
-    is_immutable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # True for server IP, gateway, loopback
-    
+    is_immutable: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )  # True for server IP, gateway, loopback
+
     created_by_user_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -102,4 +120,6 @@ class Whitelist(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Whitelist id={self.id} cidr='{self.cidr}' immutable={self.is_immutable}>"
+        return (
+            f"<Whitelist id={self.id} cidr='{self.cidr}' immutable={self.is_immutable}>"
+        )

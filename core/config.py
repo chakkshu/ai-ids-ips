@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     SENSOR_INTERFACE: str = "auto"
     SENSOR_BPF_FILTER: str = "ip"
     SENSOR_FLOW_TIMEOUT_ACTIVE: int = 120  # seconds
-    SENSOR_FLOW_TIMEOUT_IDLE: int = 30     # seconds
+    SENSOR_FLOW_TIMEOUT_IDLE: int = 30  # seconds
     SENSOR_SIMULATION_MODE: bool = True
 
     # Prevention Engine Settings
@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     ML_MODEL_REGISTRY_PATH: str = str(BASE_DIR / "ml" / "registry")
     ML_ACTIVE_MODEL_VERSION: str = "1.0.0"
     ML_DRIFT_THRESHOLD_PSI: float = 0.25
+    ML_DRIFT_CRITICAL_PSI: float = 0.5
+    ML_DRIFT_P_VALUE_THRESHOLD: float = 0.05
+    ML_RANDOM_SEED: int = 42
+    ML_CONFIDENCE_THRESHOLD: float = 0.70
+    ML_ANOMALY_SCORE_THRESHOLD: float = 0.60
+    ML_DATASET_DIR: str = str(BASE_DIR / "data" / "raw")
 
     # Threat Intelligence Integrations
     ABUSEIPDB_API_KEY: str | None = None
@@ -93,10 +99,46 @@ class Settings(BaseSettings):
     SLACK_WEBHOOK_URL: str | None = None
     TEAMS_WEBHOOK_URL: str | None = None
 
+    # Password Hashing (Argon2id) - explicit, tunable parameters
+    ARGON2_TIME_COST: int = 3
+    ARGON2_MEMORY_COST: int = 65536  # KiB (64 MiB)
+    ARGON2_PARALLELISM: int = 4
+    ARGON2_HASH_LEN: int = 32
+    ARGON2_SALT_LEN: int = 16
+
+    # Password Policy
+    PASSWORD_MIN_LENGTH: int = 12
+    PASSWORD_HISTORY_DEPTH: int = 5
+
+    # Account Lockout & Login Throttling
+    LOGIN_MAX_ATTEMPTS: int = 5
+    LOGIN_LOCKOUT_MINUTES: int = 15
+
+    # Server-side Session Policy
+    SESSION_IDLE_TIMEOUT_MINUTES: int = 30
+    SESSION_ABSOLUTE_TIMEOUT_HOURS: int = 8
+    SESSION_COOKIE_SAMESITE: Literal["Lax", "Strict"] = "Strict"
+
+    # Trusted reverse proxy handling. Set to the exact number of proxies in
+    # front of the application (0 disables X-Forwarded-* trust entirely).
+    TRUSTED_PROXY_HOPS: int = 0
+
+    # Rate limiting backend. Production must use Redis; dev/test use memory.
+    RATELIMIT_STORAGE_URI: str | None = None
+
+    # TOTP / Recovery Codes
+    TOTP_ISSUER: str = "AI-IDS-IPS-SOC"
+    TOTP_VALID_WINDOW: int = 1
+    RECOVERY_CODE_COUNT: int = 10
+
+    # Socket.IO browser origins. Empty means same-origin only.
+    SOCKETIO_ALLOWED_ORIGINS: str = ""
+
     # Initial Admin Account Seed
     INITIAL_ADMIN_USERNAME: str = "admin"
     INITIAL_ADMIN_EMAIL: str = "admin@ai-ids-ips.local"
     INITIAL_ADMIN_PASSWORD: str = "ChangeMeOnFirstLogin123!"
+    INITIAL_ADMIN_FORCE_PASSWORD_CHANGE: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -111,7 +153,9 @@ class Settings(BaseSettings):
         """Validate KEK is valid 32-byte hex string (64 characters)."""
         clean_v = v.strip()
         if len(clean_v) != 64:
-            raise ValueError("APP_MASTER_KEK must be exactly 64 hex characters (32 bytes)")
+            raise ValueError(
+                "APP_MASTER_KEK must be exactly 64 hex characters (32 bytes)"
+            )
         try:
             bytes.fromhex(clean_v)
         except ValueError as exc:
@@ -123,7 +167,40 @@ class Settings(BaseSettings):
     def validate_confidence(cls, v: float) -> float:
         """Ensure confidence threshold is between 0.50 and 1.00."""
         if not (0.5 <= v <= 1.0):
-            raise ValueError("PREVENTION_CONFIDENCE_THRESHOLD must be between 0.5 and 1.0")
+            raise ValueError(
+                "PREVENTION_CONFIDENCE_THRESHOLD must be between 0.5 and 1.0"
+            )
+        return v
+
+    @field_validator(
+        "ARGON2_TIME_COST",
+        "ARGON2_MEMORY_COST",
+        "ARGON2_PARALLELISM",
+        "ARGON2_HASH_LEN",
+        "ARGON2_SALT_LEN",
+        "PASSWORD_MIN_LENGTH",
+        "PASSWORD_HISTORY_DEPTH",
+        "LOGIN_MAX_ATTEMPTS",
+        "LOGIN_LOCKOUT_MINUTES",
+        "SESSION_IDLE_TIMEOUT_MINUTES",
+        "SESSION_ABSOLUTE_TIMEOUT_HOURS",
+        "TOTP_VALID_WINDOW",
+        "RECOVERY_CODE_COUNT",
+        "ML_RANDOM_SEED",
+    )
+    @classmethod
+    def validate_positive_int(cls, v: int) -> int:
+        """Reject non-positive security parameters."""
+        if v <= 0:
+            raise ValueError("Security parameters must be positive integers")
+        return v
+
+    @field_validator("TRUSTED_PROXY_HOPS")
+    @classmethod
+    def validate_proxy_hops(cls, v: int) -> int:
+        """Proxy hop count must be a non-negative integer."""
+        if v < 0:
+            raise ValueError("TRUSTED_PROXY_HOPS must be zero or greater")
         return v
 
     def get_database_url(self) -> str:
@@ -140,10 +217,37 @@ class Settings(BaseSettings):
             return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
-    def get_parsed_whitelist(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    def get_rate_limit_storage_uri(self) -> str:
+        """Return the Flask-Limiter storage backend.
+
+        Production must use Redis so limits are shared across workers. Development
+        and test environments use in-memory storage to avoid an external dependency.
+        """
+        if self.RATELIMIT_STORAGE_URI:
+            return self.RATELIMIT_STORAGE_URI
+        if self.APP_ENV == "production":
+            return self.get_redis_url()
+        return "memory://"
+
+    def get_socketio_origins(self) -> list[str] | None:
+        """Return explicit Socket.IO origins, or None to enforce same-origin only."""
+        origins = [
+            item.strip()
+            for item in self.SOCKETIO_ALLOWED_ORIGINS.split(",")
+            if item.strip()
+        ]
+        return origins or None
+
+    def get_parsed_whitelist(
+        self,
+    ) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
         """Parse comma-separated CIDR strings into validated IP network objects."""
         networks = []
-        raw_entries = [entry.strip() for entry in self.PREVENTION_WHITELIST.split(",") if entry.strip()]
+        raw_entries = [
+            entry.strip()
+            for entry in self.PREVENTION_WHITELIST.split(",")
+            if entry.strip()
+        ]
         for entry in raw_entries:
             try:
                 net = ipaddress.ip_network(entry, strict=False)

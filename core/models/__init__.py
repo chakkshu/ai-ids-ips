@@ -10,7 +10,14 @@ from core.models.detection import Detection
 from core.models.mlops import AnalystFeedback, DriftMetric, ModelArtifact
 from core.models.network import NetworkFlow
 from core.models.prevention import BlockedIP, BlockStatus, Whitelist
-from core.models.user import APIKey, User, UserRole, UserSession
+from core.models.user import (
+    APIKey,
+    PasswordHistory,
+    RecoveryCode,
+    User,
+    UserRole,
+    UserSession,
+)
 
 __all__ = [
     "GENESIS_HASH",
@@ -27,6 +34,8 @@ __all__ = [
     "DriftMetric",
     "ModelArtifact",
     "NetworkFlow",
+    "PasswordHistory",
+    "RecoveryCode",
     "User",
     "UserRole",
     "UserSession",

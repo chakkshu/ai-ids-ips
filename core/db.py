@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, scoped_session, sessionmaker
 
 from core.config import settings
@@ -25,14 +25,23 @@ class Base(DeclarativeBase):
 def get_engine(db_url: str | None = None, echo: bool = False):
     """Create and return a configured SQLAlchemy engine with connection pool hardening."""
     url = db_url or settings.get_database_url()
-    
+
     # SQLite in-memory or file mode for tests
     if url.startswith("sqlite"):
-        return create_engine(
+        sqlite_engine = create_engine(
             url,
             connect_args={"check_same_thread": False},
             echo=echo,
         )
+
+        @event.listens_for(sqlite_engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, connection_record) -> None:  # type: ignore[no-untyped-def]
+            del connection_record
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        return sqlite_engine
 
     # PostgreSQL enterprise production pool configuration
     return create_engine(

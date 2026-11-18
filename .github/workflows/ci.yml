@@ -2,9 +2,9 @@ name: AI-IDS-IPS CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, develop, master ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main, develop, master ]
 
 jobs:
   lint-and-security:
@@ -23,13 +23,16 @@ jobs:
       - name: Install Linting & SAST Tools
         run: |
           python -m pip install --upgrade pip
-          pip install ruff black mypy bandit pip-audit
+          pip install -r requirements-dev.txt
 
       - name: Check Code Formatting (Black)
         run: black --check .
 
       - name: Lint Codebase (Ruff)
         run: ruff check .
+
+      - name: Static Type Analysis (mypy)
+        run: mypy core services run.py
 
       - name: Static Security Analysis (Bandit SAST)
         run: bandit -r core ml services prevention capture utils -ll
@@ -77,13 +80,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Validate Alembic Migrations (PostgreSQL)
+        env:
+          DATABASE_URL: postgresql+psycopg2://test_admin:test_password@localhost:5432/ai_ids_ips_test
+          APP_MASTER_KEK: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          AUDIT_HMAC_SECRET: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+        run: |
+          alembic upgrade head
+          alembic current
+          alembic downgrade base
+          alembic upgrade head
+
       - name: Run Pytest with Coverage
         env:
           APP_ENV: testing
-          DATABASE_URL: postgresql://test_admin:test_password@localhost:5432/ai_ids_ips_test
+          DATABASE_URL: postgresql+psycopg2://test_admin:test_password@localhost:5432/ai_ids_ips_test
+          AI_IDS_TEST_DATABASE_URL: postgresql+psycopg2://test_admin:test_password@localhost:5432/ai_ids_ips_test
           REDIS_URL: redis://localhost:6379/0
+          RATELIMIT_STORAGE_URI: memory://
           APP_MASTER_KEK: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           AUDIT_HMAC_SECRET: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          ARGON2_TIME_COST: "1"
+          ARGON2_MEMORY_COST: "8192"
+          ARGON2_PARALLELISM: "1"
         run: |
           pytest --cov=core --cov=ml --cov=services --cov=prevention --cov=capture --cov=utils --cov-report=xml tests/
 

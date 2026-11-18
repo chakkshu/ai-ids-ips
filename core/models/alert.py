@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 class AlertSeverity(str, enum.Enum):
     """Normalized security alert severity levels."""
+
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -40,11 +41,17 @@ class AlertSeverity(str, enum.Enum):
 
 class AlertStatus(str, enum.Enum):
     """Incident response workflow states."""
+
     NEW = "new"
     ACKNOWLEDGED = "acknowledged"
     INVESTIGATING = "investigating"
     RESOLVED = "resolved"
     FALSE_POSITIVE = "false_positive"
+
+
+def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
+    """Persist enum values (lowercase), matching the Alembic schema."""
+    return [member.value for member in enum_cls]
 
 
 class Alert(Base):
@@ -63,33 +70,41 @@ class Alert(Base):
         nullable=False,
         index=True,
     )
-    
+
     # Deduplication key = sha256(src_ip + attack_type + 5_min_bucket)
     dedup_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     occurrence_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    
+
     title: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    
+
     severity: Mapped[AlertSeverity] = mapped_column(
-        Enum(AlertSeverity, name="alert_severity_enum"),
+        Enum(
+            AlertSeverity,
+            name="alert_severity_enum",
+            values_callable=_enum_values,
+        ),
         default=AlertSeverity.MEDIUM,
         nullable=False,
         index=True,
     )
     status: Mapped[AlertStatus] = mapped_column(
-        Enum(AlertStatus, name="alert_status_enum"),
+        Enum(
+            AlertStatus,
+            name="alert_status_enum",
+            values_callable=_enum_values,
+        ),
         default=AlertStatus.NEW,
         nullable=False,
         index=True,
     )
-    
+
     # Source / Target Details for Fast SOC Querying
     src_ip: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
     dst_ip: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
     dst_port: Mapped[int] = mapped_column(Integer, nullable=False)
     attack_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    
+
     # Workflow Assignment
     assigned_user_id: Mapped[int | None] = mapped_column(
         Integer,
@@ -99,11 +114,17 @@ class Alert(Base):
     )
     assigned_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     resolution_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # External Notification Tracking
-    email_dispatched: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    webhook_dispatched: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    email_dispatched: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    webhook_dispatched: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -5,70 +5,100 @@
 {% block content %}
 <div class="page-header">
     <div>
-        <h1 class="page-title">User Management & RBAC Administration</h1>
-        <p class="page-subtitle">Configure analyst accounts, enforce password policies, and manage roles</p>
+        <h1 class="page-title">User Management &amp; RBAC Administration</h1>
+        <p class="page-subtitle">Provision accounts, enforce password policy, and manage roles and lockouts</p>
     </div>
 </div>
 
-<div style="display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; align-items: start;">
-    <!-- Users List Table -->
+<div class="layout-2-1">
     <div class="soc-card">
-        <h2 style="font-size: 15px; font-weight: 600; margin-bottom: 1rem;">Registered Console Users</h2>
-        
+        <h2 class="card-title">Registered Console Users</h2>
+
         <div class="soc-table-wrapper">
             <table class="soc-table">
                 <thead>
                     <tr>
-                        <th>Username</th>
-                        <th>Role</th>
-                        <th>Status</th>
-                        <th>2FA</th>
-                        <th>Failed Attempts</th>
-                        <th>Actions</th>
+                        <th scope="col">User</th>
+                        <th scope="col">Role</th>
+                        <th scope="col">Status</th>
+                        <th scope="col">2FA</th>
+                        <th scope="col">Failures</th>
+                        <th scope="col">Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for u in users %}
                     <tr>
                         <td>
-                            <div style="font-weight: 600;">{{ u.username }}</div>
-                            <div style="font-size: 11px; color: var(--text-muted);">{{ u.email }}</div>
+                            <div class="strong">{{ u.username }}</div>
+                            <div class="text-muted small">{{ u.email }}</div>
                         </td>
                         <td>
-                            <span class="role-badge {{ u.role.value }}">{{ u.role.value }}</span>
+                            <form method="POST" action="{{ url_for('users.update_role', user_id=u.id) }}" class="inline-form role-form">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <label class="visually-hidden" for="role-{{ u.id }}">Role for {{ u.username }}</label>
+                                <select id="role-{{ u.id }}" name="role" class="form-control form-control-sm">
+                                    {% for role in roles %}
+                                    <option value="{{ role.value }}" {% if u.role.value == role.value %}selected{% endif %}>{{ role.value | capitalize }}</option>
+                                    {% endfor %}
+                                </select>
+                                <button type="submit" class="btn btn-secondary btn-sm">Update</button>
+                            </form>
                         </td>
                         <td>
-                            {% if u.locked_until and u.locked_until > now %}
+                            {% if u.locked %}
                             <span class="badge badge-critical" title="Locked until {{ u.locked_until }}">Locked</span>
                             {% elif not u.is_active %}
-                            <span class="badge" style="background-color: var(--border-color); color: var(--text-muted);">Disabled</span>
+                            <span class="badge badge-disabled">Disabled</span>
                             {% else %}
                             <span class="badge badge-benign">Active</span>
+                            {% endif %}
+                            {% if u.must_change_password %}
+                            <span class="badge badge-medium" title="Password change required">Pwd reset</span>
                             {% endif %}
                         </td>
                         <td>
                             {% if u.is_totp_enabled %}
-                            <span style="color: var(--color-benign);">● Enabled</span>
+                            <span class="totp-on">Enabled</span>
                             {% else %}
-                            <span style="color: var(--text-dim);">○ Disabled</span>
+                            <span class="totp-off">Disabled</span>
                             {% endif %}
                         </td>
-                        <td>{{ u.failed_login_attempts }}</td>
+                        <td class="mono-cell">{{ u.failed_login_attempts }}</td>
                         <td>
-                            <div style="display: flex; gap: 4px;">
-                                {% if u.locked_until and u.locked_until > now %}
-                                <form method="POST" action="{{ url_for('users.unlock_user', user_id=u.id) }}">
+                            <div class="action-row-tight">
+                                {% if u.locked %}
+                                <form method="POST" action="{{ url_for('users.unlock_user', user_id=u.id) }}" class="inline-form">
                                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                    <button type="submit" class="btn btn-secondary btn-sm" title="Unlock Account">Unlock</button>
+                                    <button type="submit" class="btn btn-secondary btn-sm">Unlock</button>
                                 </form>
                                 {% endif %}
-                                <form method="POST" action="{{ url_for('users.toggle_active', user_id=u.id) }}">
+
+                                {% if u.is_active %}
+                                <form method="POST" action="{{ url_for('users.deactivate_user', user_id=u.id) }}" class="inline-form">
                                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                    {% if u.is_active %}
-                                    <button type="submit" class="btn btn-danger btn-sm" {% if u.id == current_user.id %}disabled{% endif %}>Disable</button>
-                                    {% else %}
+                                    <button type="submit" class="btn btn-danger btn-sm" {% if u.id == current_user.id %}disabled title="You cannot deactivate your own account"{% endif %}>Disable</button>
+                                </form>
+                                {% else %}
+                                <form method="POST" action="{{ url_for('users.activate_user', user_id=u.id) }}" class="inline-form">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                     <button type="submit" class="btn btn-secondary btn-sm">Enable</button>
-                                    {% endif %}
+                                </form>
+                                {% endif %}
+
+                                <form method="POST" action="{{ url_for('users.reset_2fa', user_id=u.id) }}" class="inline-form" data-confirm="Reset two-factor authentication for {{ u.username }}? All sessions will be revoked.">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                    <button type="submit" class="btn btn-secondary btn-sm" {% if not u.is_totp_enabled %}disabled{% endif %}>Reset 2FA</button>
+                                </form>
+
+                                <form method="POST" action="{{ url_for('users.force_password_change', user_id=u.id) }}" class="inline-form" data-confirm="Require {{ u.username }} to change their password at next login? All sessions will be revoked.">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                    <button type="submit" class="btn btn-secondary btn-sm">Force pwd</button>
+                                </form>
+
+                                <form method="POST" action="{{ url_for('users.delete_user', user_id=u.id) }}" class="inline-form" data-confirm="Permanently delete {{ u.username }}? This cannot be undone.">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                    <button type="submit" class="btn btn-danger btn-sm" {% if u.id == current_user.id %}disabled title="You cannot delete your own account"{% endif %}>Delete</button>
                                 </form>
                             </div>
                         </td>
@@ -79,43 +109,39 @@
         </div>
     </div>
 
-    <!-- Create User Panel -->
     <div class="soc-card">
-        <h2 style="font-size: 15px; font-weight: 600; margin-bottom: 1rem;">Provision New User</h2>
+        <h2 class="card-title">Provision New User</h2>
 
         <form method="POST" action="{{ url_for('users.create_user') }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
             <div class="form-group">
                 <label class="form-label" for="new_username">Username</label>
-                <input type="text" id="new_username" name="username" class="form-control" required placeholder="analyst_jane">
+                <input type="text" id="new_username" name="username" class="form-control" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.\-]{3,32}" autocomplete="off" placeholder="analyst_jane">
             </div>
 
             <div class="form-group">
                 <label class="form-label" for="new_email">Email Address</label>
-                <input type="email" id="new_email" name="email" class="form-control" required placeholder="jane@enterprise.local">
+                <input type="email" id="new_email" name="email" class="form-control" required maxlength="128" autocomplete="off" placeholder="jane@enterprise.local">
             </div>
 
             <div class="form-group">
                 <label class="form-label" for="new_role">Security Role</label>
                 <select id="new_role" name="role" class="form-control">
-                    <option value="viewer">Viewer (Read-Only)</option>
-                    <option value="analyst" selected>Analyst (Triage & Intel)</option>
-                    <option value="admin">Admin (Full Control)</option>
+                    {% for role in roles %}
+                    <option value="{{ role.value }}" {% if role.value == 'viewer' %}selected{% endif %}>{{ role.value | capitalize }}</option>
+                    {% endfor %}
                 </select>
+                <p class="form-help">Admin: full control. Analyst: triage and verification. Viewer: read-only.</p>
             </div>
 
             <div class="form-group">
                 <label class="form-label" for="initial_password">Temporary Password</label>
-                <input type="password" id="initial_password" name="password" class="form-control" required placeholder="Min 12 chars, mixed case, symbols">
-                <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">
-                    User will be forced to change this upon first login.
-                </div>
+                <input type="password" id="initial_password" name="password" class="form-control" required minlength="12" autocomplete="new-password" placeholder="Min 12 chars, mixed case, symbols">
+                <p class="form-help">The user is forced to change this password at first login.</p>
             </div>
 
-            <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 0.5rem;">
-                Create Account
-            </button>
+            <button type="submit" class="btn btn-primary btn-block">Create Account</button>
         </form>
     </div>
 </div>
