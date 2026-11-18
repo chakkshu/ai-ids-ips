@@ -137,6 +137,19 @@ MODEL_FEATURES: tuple[str, ...] = tuple(
     name for name in RAW_FEATURE_NAMES if name not in IDENTIFIER_COLUMNS
 )
 
+DESTINATION_PORT = "Destination Port"
+
+# Named, ordered feature contracts. A processed bundle always stores the full
+# 78-column matrix; a variant selects a stable subset at training time so two
+# variants can be trained from the exact same cleaned rows and split.
+FEATURE_VARIANTS: dict[str, tuple[str, ...]] = {
+    "full": MODEL_FEATURES,
+    "no_destination_port": tuple(
+        name for name in MODEL_FEATURES if name != DESTINATION_PORT
+    ),
+}
+DEFAULT_FEATURE_VARIANT = "full"
+
 # Column aliases seen in the published CSVs (whitespace-stripped).
 COLUMN_ALIASES: dict[str, str] = {
     "Fwd Header Length.1": "Fwd Header Length_Duplicate",
@@ -204,6 +217,21 @@ def is_known_label(raw: str | float | None) -> bool:
     return normalize_label(raw) in CANONICAL_LABELS
 
 
+def features_for_variant(name: str = DEFAULT_FEATURE_VARIANT) -> tuple[str, ...]:
+    """Return the ordered feature contract for a named variant.
+
+    Unknown names are rejected rather than silently falling back to the full
+    contract, so a typo cannot produce a mislabelled artifact.
+    """
+
+    if name not in FEATURE_VARIANTS:
+        raise ValueError(
+            f"unknown feature variant: {name!r}; expected one of "
+            + ", ".join(sorted(FEATURE_VARIANTS))
+        )
+    return FEATURE_VARIANTS[name]
+
+
 def canonicalize_columns(columns: Iterable[str]) -> list[str]:
     """Strip whitespace and resolve duplicate/aliased column names once."""
 
@@ -242,6 +270,21 @@ def assert_schema_consistency() -> None:
         raise ValueError("The label must never be a model feature")
     if not set(IDENTIFIER_COLUMNS).isdisjoint(MODEL_FEATURES):
         raise ValueError("Identifier columns must not be model features")
+    for variant, names in FEATURE_VARIANTS.items():
+        if len(names) != len(set(names)):
+            raise ValueError(f"feature variant {variant} contains duplicates")
+        if not set(names).issubset(set(MODEL_FEATURES)):
+            raise ValueError(
+                f"feature variant {variant} is not a MODEL_FEATURES subset"
+            )
+    if DESTINATION_PORT not in FEATURE_VARIANTS["full"]:
+        raise ValueError("the full variant must include Destination Port")
+    if DESTINATION_PORT in FEATURE_VARIANTS["no_destination_port"]:
+        raise ValueError(
+            "the no_destination_port variant must exclude Destination Port"
+        )
+    if DEFAULT_FEATURE_VARIANT not in FEATURE_VARIANTS:
+        raise ValueError("default feature variant is not registered")
 
 
 assert_schema_consistency()

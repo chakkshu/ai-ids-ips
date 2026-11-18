@@ -15,7 +15,7 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from ml.predict import ModelCache, load_artifacts_from_directory
 from ml.registry import store
 from ml.registry.errors import ChecksumError
-from ml.schema import MODEL_FEATURES
+from ml.schema import MODEL_FEATURES, features_for_variant
 
 
 class FakeModel:
@@ -45,10 +45,13 @@ def _stage_version(
     *,
     probabilities: tuple[float, float] = (0.9, 0.1),
     anomaly_score: float = 5.0,
+    features: list[str] | None = None,
+    feature_variant: str = "full",
 ) -> Path:
     work = root.parent / f"work-{version}"
     work.mkdir(parents=True, exist_ok=True)
-    n = len(MODEL_FEATURES)
+    contract_features = list(features) if features is not None else list(MODEL_FEATURES)
+    n = len(contract_features)
     joblib.dump(FakeModel(probabilities, n), work / "model.joblib")
     joblib.dump(StandardScaler().fit(np.zeros((2, n))), work / "scaler.joblib")
     joblib.dump(LabelEncoder().fit(["BENIGN", "DDoS"]), work / "encoder.joblib")
@@ -62,13 +65,15 @@ def _stage_version(
     )
     payloads = {
         "features.json": {
-            "features": list(MODEL_FEATURES),
+            "feature_variant": feature_variant,
+            "features": contract_features,
             "impute_values": [0.0] * n,
         },
         "config.json": {
             "confidence_threshold": 0.7,
             "anomaly_threshold": 0.6,
             "seed": 1,
+            "feature_variant": feature_variant,
         },
         "baseline.json": {"feature_names": list(MODEL_FEATURES)},
         "metrics.json": {"accuracy": 1.0},
@@ -85,7 +90,11 @@ def _stage_version(
     store.stage_version(
         version,
         {name: work / name for name in names},
-        {"feature_names": list(MODEL_FEATURES), "metrics": {"accuracy": 1.0}},
+        {
+            "feature_variant": feature_variant,
+            "feature_names": contract_features,
+            "metrics": {"accuracy": 1.0},
+        },
         root,
     )
     return store.version_directory(version, root, area="staging")
@@ -131,6 +140,38 @@ def test_feature_order_and_contract_enforcement(tmp_path: Path) -> None:
     extra["surprise"] = 1.0
     with pytest.raises(ValueError, match="feature contract"):
         bundle.predict_single(extra)
+
+
+def test_no_destination_port_variant_contract_is_enforced(tmp_path: Path) -> None:
+    variant_features = list(features_for_variant("no_destination_port"))
+    directory = _stage_version(
+        tmp_path / "registry",
+        "no-port",
+        features=variant_features,
+        feature_variant="no_destination_port",
+    )
+    bundle = load_artifacts_from_directory(directory)
+    assert bundle.feature_variant == "no_destination_port"
+    assert bundle.feature_names == variant_features
+
+    # A 78-feature flow carries an extra column for this variant.
+    with pytest.raises(ValueError, match="feature contract"):
+        bundle.predict_single(_flow())
+    accepted = {
+        name: value for name, value in _flow().items() if name in variant_features
+    }
+    assert np.isfinite(bundle.predict_single(accepted).confidence)
+
+
+def test_mislabelled_variant_contract_is_refused(tmp_path: Path) -> None:
+    directory = _stage_version(
+        tmp_path / "registry",
+        "mislabelled",
+        features=list(features_for_variant("no_destination_port")),
+        feature_variant="full",
+    )
+    with pytest.raises(ChecksumError, match="feature variant"):
+        load_artifacts_from_directory(directory)
 
 
 def test_nan_and_infinity_are_handled_safely(tmp_path: Path) -> None:

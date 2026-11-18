@@ -13,6 +13,7 @@ import sys
 
 from core.config import settings
 from core.logging import get_logger, setup_logging
+from ml.schema import FEATURE_VARIANTS
 
 logger = get_logger("run")
 
@@ -217,6 +218,12 @@ def cmd_preprocess(args: argparse.Namespace) -> int:
         argv.extend(["--sample-fraction", str(args.sample_fraction)])
     if args.max_rows_per_class is not None:
         argv.extend(["--max-rows-per-class", str(args.max_rows_per_class)])
+    if args.stream_sample:
+        argv.append("--stream-sample")
+    argv.extend(["--min-available-gb", str(args.min_available_gb)])
+    argv.extend(["--memory-interval", str(args.memory_interval)])
+    if args.memory_log is not None:
+        argv.extend(["--memory-log", str(args.memory_log)])
     return preprocess_main(argv)
 
 
@@ -240,7 +247,17 @@ def cmd_train(args: argparse.Namespace) -> int:
         str(args.n_jobs),
         "--resampling",
         args.resampling,
+        "--feature-variant",
+        args.feature_variant,
+        "--max-trees",
+        str(args.max_trees),
+        "--min-available-gb",
+        str(args.min_available_gb),
+        "--memory-interval",
+        str(args.memory_interval),
     ]
+    if args.memory_log is not None:
+        argv.extend(["--memory-log", str(args.memory_log)])
     if args.version:
         argv.extend(["--version", args.version])
     if args.no_register:
@@ -288,6 +305,32 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             str(args.output_dir),
         ]
     )
+
+
+def cmd_natural_fpr(args: argparse.Namespace) -> int:
+    """Score a natural-distribution BENIGN sample from raw CSVs."""
+
+    from ml.natural_fpr import main as natural_fpr_main
+
+    argv = [
+        "--input-dir",
+        str(args.input_dir),
+        "--artifact-dir",
+        str(args.artifact_dir),
+        "--max-rows",
+        str(args.max_rows),
+        "--chunksize",
+        str(args.chunksize),
+        "--min-available-gb",
+        str(args.min_available_gb),
+        "--memory-interval",
+        str(args.memory_interval),
+    ]
+    if args.memory_log is not None:
+        argv.extend(["--memory-log", str(args.memory_log)])
+    if args.output is not None:
+        argv.extend(["--output", str(args.output)])
+    return natural_fpr_main(argv)
 
 
 def cmd_registry_list(args: argparse.Namespace) -> int:
@@ -454,6 +497,14 @@ def main() -> int:
         "--scaler", choices=("standard", "robust"), default="standard"
     )
     preprocess_p.add_argument("--seed", type=int, default=settings.ML_RANDOM_SEED)
+    preprocess_p.add_argument(
+        "--stream-sample",
+        action="store_true",
+        help="sample/cap each CSV chunk immediately to bound peak RAM",
+    )
+    preprocess_p.add_argument("--min-available-gb", type=float, default=0.5)
+    preprocess_p.add_argument("--memory-interval", type=float, default=15.0)
+    preprocess_p.add_argument("--memory-log", default=None)
     preprocess_p.set_defaults(func=cmd_preprocess)
 
     train_p = subparsers.add_parser(
@@ -463,11 +514,21 @@ def main() -> int:
     train_p.add_argument("--registry-root", default=settings.ML_MODEL_REGISTRY_PATH)
     train_p.add_argument("--version", default=None)
     train_p.add_argument("--seed", type=int, default=settings.ML_RANDOM_SEED)
-    train_p.add_argument("--n-iter", type=int, default=10)
-    train_p.add_argument("--cv-folds", type=int, default=5)
-    train_p.add_argument("--n-jobs", type=int, default=-1)
+    train_p.add_argument("--n-iter", type=int, default=8)
+    train_p.add_argument("--cv-folds", type=int, default=3)
+    train_p.add_argument("--n-jobs", type=int, default=2)
+    train_p.add_argument("--max-trees", type=int, default=200)
+    train_p.add_argument("--min-available-gb", type=float, default=0.5)
+    train_p.add_argument("--memory-interval", type=float, default=15.0)
+    train_p.add_argument("--memory-log", default=None)
     train_p.add_argument(
         "--resampling", choices=("none", "smote", "undersample"), default="none"
+    )
+    train_p.add_argument(
+        "--feature-variant",
+        choices=sorted(FEATURE_VARIANTS),
+        default="full",
+        help="feature contract to train; both variants share the processed rows",
     )
     train_p.add_argument("--no-register", action="store_true")
     train_p.add_argument("--actor-id", type=int, default=None)
@@ -493,6 +554,20 @@ def main() -> int:
     evaluate_p.add_argument("--artifact-dir", required=True)
     evaluate_p.add_argument("--output-dir", required=True)
     evaluate_p.set_defaults(func=cmd_evaluate)
+
+    natural_p = subparsers.add_parser(
+        "natural-fpr",
+        help="Measure FPR on a natural-distribution BENIGN sample from raw CSVs",
+    )
+    natural_p.add_argument("--input-dir", default=settings.ML_DATASET_DIR)
+    natural_p.add_argument("--artifact-dir", required=True)
+    natural_p.add_argument("--output", default=None)
+    natural_p.add_argument("--max-rows", type=int, default=20_000)
+    natural_p.add_argument("--chunksize", type=int, default=50_000)
+    natural_p.add_argument("--min-available-gb", type=float, default=0.5)
+    natural_p.add_argument("--memory-interval", type=float, default=15.0)
+    natural_p.add_argument("--memory-log", default=None)
+    natural_p.set_defaults(func=cmd_natural_fpr)
 
     list_p = subparsers.add_parser(
         "registry-list", help="List registered model versions and statuses"

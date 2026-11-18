@@ -25,8 +25,11 @@ from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from core.config import settings
 from core.logging import get_logger
+from ml.memory import MemoryGuard
 from ml.schema import (
     CANONICAL_LABELS,
+    DEFAULT_FEATURE_VARIANT,
+    IDENTIFIER_COLUMNS,
     LABEL_COLUMN,
     MODEL_FEATURES,
     RARE_CLASS_LABELS,
@@ -81,6 +84,16 @@ class CleaningReport:
     rare_rows_merged: int = 0
     rare_rows_dropped: int = 0
     problems: list[str] = field(default_factory=list)
+    # Streaming-specific accounting. ``rows_scanned`` covers every raw row
+    # read; ``class_counts_scanned`` is the untouched label distribution.
+    streamed: bool = False
+    rows_scanned: int = 0
+    rows_sampled: int = 0
+    rare_rows_preserved: int = 0
+    sample_fraction: float | None = None
+    max_rows_per_class: int | None = None
+    class_counts_scanned: dict[str, int] = field(default_factory=dict)
+    class_counts_kept: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +108,14 @@ class CleaningReport:
             "rare_rows_merged": self.rare_rows_merged,
             "rare_rows_dropped": self.rare_rows_dropped,
             "problems": self.problems,
+            "streamed": self.streamed,
+            "rows_scanned": self.rows_scanned,
+            "rows_sampled": self.rows_sampled,
+            "rare_rows_preserved": self.rare_rows_preserved,
+            "sample_fraction": self.sample_fraction,
+            "max_rows_per_class": self.max_rows_per_class,
+            "class_counts_scanned": self.class_counts_scanned,
+            "class_counts_kept": self.class_counts_kept,
         }
 
 
@@ -113,6 +134,9 @@ class PreprocessResult:
 
     def as_metadata(self) -> dict[str, Any]:
         return {
+            # The stored matrix is always the full contract. Feature variants
+            # are selected from it at training time and recorded per model.
+            "feature_variant": DEFAULT_FEATURE_VARIANT,
             "feature_names": self.feature_names,
             "split_sizes": {
                 "train": len(self.split.train),
@@ -179,16 +203,23 @@ def canonicalize_frame(frame: pd.DataFrame, problems: list[str]) -> pd.DataFrame
     frame = frame.rename(columns=lambda name: str(name).strip())
     frame.columns = canonicalize_columns(frame.columns)
     expected = set(RAW_COLUMNS)
-    missing = sorted(expected.difference(frame.columns))
+    # Identifier/non-stationary columns are optional inputs: the supplied CSVs
+    # omit all six, and none is a model feature. Only the 78 model features and
+    # the label are required; a missing required column is handled by the NaN
+    # policy below rather than being silently manufactured as a zero.
+    required = expected.difference(IDENTIFIER_COLUMNS)
+    missing = sorted(required.difference(frame.columns))
     if missing:
-        problems.append(f"missing expected columns: {', '.join(missing)}")
+        problems.append(f"missing required columns: {', '.join(missing)}")
     extra = sorted(set(frame.columns).difference(expected))
     if extra:
         problems.append(f"unexpected columns ignored: {', '.join(extra)}")
-    # Missing columns are added as NaN so the downstream NaN policy is explicit.
     for column in missing:
         frame[column] = np.nan
-    return frame.loc[:, list(RAW_COLUMNS)].copy()
+    present = [
+        column for column in RAW_COLUMNS if column in frame.columns or column in missing
+    ]
+    return frame.loc[:, present].copy()
 
 
 def clean_frame(
@@ -253,7 +284,9 @@ def clean_frame(
     return frame, report
 
 
-def read_csv_chunks(path: Path, chunksize: int | None) -> Iterable[pd.DataFrame]:
+def read_csv_chunks(
+    path: Path, chunksize: int | None, *, problems: list[str] | None = None
+) -> Iterable[pd.DataFrame]:
     """Yield canonicalised chunks; ``chunksize=None`` yields the whole file."""
 
     reader = pd.read_csv(
@@ -264,10 +297,11 @@ def read_csv_chunks(path: Path, chunksize: int | None) -> Iterable[pd.DataFrame]
         encoding_errors="replace",
     )
     chunks = reader if chunksize else [reader]
+    findings = problems if problems is not None else []
     for chunk in chunks:
         # Canonicalise before downcasting: the source contains two columns
         # literally named "Fwd Header Length", which pandas cannot index by name.
-        yield _downcast_numeric(canonicalize_frame(chunk, []))
+        yield _downcast_numeric(canonicalize_frame(chunk, findings))
 
 
 def _apply_sampling(
@@ -290,6 +324,144 @@ def _apply_sampling(
             .sample(frac=1, random_state=seed)
         )
     return frame.reset_index(drop=True)
+
+
+def _stream_sample_chunks(
+    paths: list[Path],
+    *,
+    sample_fraction: float | None,
+    max_rows_per_class: int | None,
+    seed: int,
+    chunksize: int,
+    problems: list[str],
+    guard: MemoryGuard | None = None,
+) -> tuple[pd.DataFrame, CleaningReport]:
+    """Reduce rows while parsing, without ever holding the full raw dataset.
+
+    Two independent reductions are supported and can be combined:
+
+    * ``sample_fraction`` samples common-class rows per chunk. Rare-class rows
+      are always retained so few-shot attacks are never lost to sampling.
+    * ``max_rows_per_class`` keeps a deterministic, uniform reservoir of at
+      most N rows per class across all chunks. Classes below the cap keep every
+      row. The reservoir ranks rows by a seeded key, so the result is a true
+      sample of the full class rather than simply the first N rows.
+
+    Peak DataFrame memory is bounded by the sum of the per-class caps (plus one
+    chunk), not by the 2.8M-row source dataset.
+    """
+
+    if sample_fraction is not None and not 0 < sample_fraction <= 1:
+        raise ValueError("sample_fraction must be in (0, 1]")
+    if max_rows_per_class is not None and max_rows_per_class < 2:
+        raise ValueError("max_rows_per_class must be at least 2")
+
+    feature_columns = list(MODEL_FEATURES)
+    kept_by_class: dict[str, list[pd.DataFrame]] = {}
+    keys_by_class: dict[str, np.ndarray] = {}
+    kept_counts: Counter[str] = Counter()
+    scanned_counts: Counter[str] = Counter()
+    rows_scanned = 0
+    inf_replaced = 0
+    chunk_index = 0
+    key_rng = np.random.default_rng(seed)
+
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        for chunk in read_csv_chunks(path, chunksize, problems=problems):
+            if guard is not None:
+                guard.check()
+            chunk[LABEL_COLUMN] = chunk[LABEL_COLUMN].map(normalize_label)
+            rows_scanned += len(chunk)
+            scanned_counts.update(chunk[LABEL_COLUMN].astype(str))
+            inf_replaced += int(
+                np.isinf(
+                    chunk[feature_columns].to_numpy(dtype="float64", na_value=np.nan)
+                ).sum()
+            )
+            chunk[feature_columns] = chunk[feature_columns].replace(
+                [np.inf, -np.inf], np.nan
+            )
+
+            rare_mask = chunk[LABEL_COLUMN].isin(RARE_CLASS_LABELS)
+            rare_rows = chunk.loc[rare_mask]
+            common_rows = chunk.loc[~rare_mask]
+            if sample_fraction is not None and sample_fraction < 1:
+                common_rows = common_rows.sample(
+                    frac=sample_fraction, random_state=seed + chunk_index
+                )
+            # Rare rows bypass fraction sampling; every other class is sampled
+            # per chunk. Both are then grouped by label before capping.
+            candidates = [
+                group
+                for frame in (rare_rows, common_rows)
+                if not frame.empty
+                for _, group in frame.groupby(LABEL_COLUMN, sort=False)
+            ]
+
+            for group in candidates:
+                label_value = str(group[LABEL_COLUMN].iloc[0])
+                buffers = kept_by_class.setdefault(label_value, [])
+                incoming = group.reset_index(drop=True)
+                if max_rows_per_class is None:
+                    buffers.append(incoming)
+                    kept_counts[label_value] += len(incoming)
+                    continue
+
+                existing_count = kept_counts[label_value]
+                if existing_count + len(incoming) <= max_rows_per_class:
+                    buffers.append(incoming)
+                    keys_by_class[label_value] = np.concatenate(
+                        [
+                            keys_by_class.get(
+                                label_value, np.empty(0, dtype="float64")
+                            ),
+                            key_rng.random(len(incoming)),
+                        ]
+                    )
+                    kept_counts[label_value] += len(incoming)
+                    continue
+
+                old_keys = keys_by_class.get(label_value, np.empty(0, dtype="float64"))
+                new_keys = key_rng.random(len(incoming))
+                all_keys = np.concatenate([old_keys, new_keys])
+                all_rows = pd.concat(
+                    [*buffers, incoming] if buffers else [incoming], ignore_index=True
+                )
+                if len(all_keys) > max_rows_per_class:
+                    selected = np.argpartition(all_keys, max_rows_per_class - 1)[
+                        :max_rows_per_class
+                    ]
+                    all_rows = all_rows.iloc[selected].reset_index(drop=True)
+                    all_keys = all_keys[selected]
+                kept_by_class[label_value] = [all_rows]
+                keys_by_class[label_value] = all_keys
+                kept_counts[label_value] = len(all_rows)
+
+            chunk_index += 1
+
+    chunks_to_merge = [frame for frames in kept_by_class.values() for frame in frames]
+    if not chunks_to_merge:
+        raise ValueError("input CSV files contained no rows")
+    combined = pd.concat(chunks_to_merge, ignore_index=True)
+    del chunks_to_merge, kept_by_class, keys_by_class
+
+    rare_preserved = sum(
+        count for label, count in kept_counts.items() if label in RARE_CLASS_LABELS
+    )
+    report = CleaningReport(
+        streamed=True,
+        rows_scanned=rows_scanned,
+        rows_sampled=int(sum(kept_counts.values())),
+        rare_rows_preserved=rare_preserved,
+        sample_fraction=sample_fraction,
+        max_rows_per_class=max_rows_per_class,
+        class_counts_scanned=dict(sorted(scanned_counts.items())),
+        class_counts_kept=dict(sorted(kept_counts.items())),
+        inf_replaced=inf_replaced,
+    )
+    return combined, report
 
 
 def stratified_split(
@@ -341,7 +513,16 @@ def fit_scaler(
         scaler = RobustScaler()
     else:
         raise ValueError(f"unknown scaler type: {scaler_type!r}")
-    scaler.fit(features.to_numpy(dtype="float64"))
+    scaler.fit(features.to_numpy(dtype="float32"))
+    # Keep scaler statistics float32 so transform() does not silently widen the
+    # memory footprint of the training matrices.
+    for attribute in ("mean_", "scale_", "var_", "center_"):
+        if hasattr(scaler, attribute):
+            setattr(
+                scaler,
+                attribute,
+                np.asarray(getattr(scaler, attribute), dtype="float32"),
+            )
     return scaler
 
 
@@ -354,38 +535,119 @@ def preprocess(
     seed: int = settings.ML_RANDOM_SEED,
     chunksize: int | None = None,
     scaler_type: str = "standard",
+    stream: bool = False,
+    memory_guard: MemoryGuard | None = None,
 ) -> PreprocessResult:
-    """Load, clean, sample, split, and fit the scaler on train rows only."""
+    """Load, clean, sample, split, and fit the scaler on train rows only.
 
+    ``stream=True`` bounds peak memory by reducing every chunk as it is parsed;
+    it requires ``chunksize`` plus at least one of ``sample_fraction`` or
+    ``max_rows_per_class``. Rare-class rows are kept in full so few-shot attacks
+    remain in the split. A :class:`~ml.memory.MemoryGuard` is checked at each
+    chunk boundary when supplied.
+    """
+
+    guard = memory_guard
+    if guard is not None:
+        guard.start()
+    try:
+        return _preprocess_impl(
+            input_paths,
+            rare_strategy=rare_strategy,
+            sample_fraction=sample_fraction,
+            max_rows_per_class=max_rows_per_class,
+            seed=seed,
+            chunksize=chunksize,
+            scaler_type=scaler_type,
+            stream=stream,
+            guard=guard,
+        )
+    finally:
+        if guard is not None:
+            guard.stop()
+
+
+def _preprocess_impl(
+    input_paths: Iterable[Path],
+    *,
+    rare_strategy: str,
+    sample_fraction: float | None,
+    max_rows_per_class: int | None,
+    seed: int,
+    chunksize: int | None,
+    scaler_type: str,
+    stream: bool,
+    guard: MemoryGuard | None,
+) -> PreprocessResult:
     paths = [Path(p) for p in input_paths]
     if not paths:
         raise ValueError("no input CSV files supplied")
     problems: list[str] = []
-    frames: list[pd.DataFrame] = []
-    for path in paths:
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        frames.extend(read_csv_chunks(path, chunksize))
-    if not frames:
-        raise ValueError("input CSV files contained no rows")
 
-    combined = pd.concat(frames, ignore_index=True)
-    del frames
-    cleaned, report = clean_frame(
-        combined, rare_strategy=rare_strategy, problems=problems
-    )
-    del combined
-    cleaned = _apply_sampling(
-        cleaned,
-        sample_fraction=sample_fraction,
-        max_rows_per_class=max_rows_per_class,
-        seed=seed,
-    )
+    if stream:
+        if chunksize is None:
+            raise ValueError("streaming preprocessing requires a chunksize")
+        if sample_fraction is None and max_rows_per_class is None:
+            raise ValueError(
+                "streaming preprocessing requires sample_fraction or max_rows_per_class"
+            )
+        sampled, stream_report = _stream_sample_chunks(
+            paths,
+            sample_fraction=sample_fraction,
+            max_rows_per_class=max_rows_per_class,
+            seed=seed,
+            chunksize=chunksize,
+            problems=problems,
+            guard=guard,
+        )
+        if guard is not None:
+            guard.check()
+        cleaned, report = clean_frame(
+            sampled, rare_strategy=rare_strategy, problems=problems
+        )
+        del sampled
+        report.streamed = True
+        report.rows_scanned = stream_report.rows_scanned
+        report.rows_sampled = stream_report.rows_sampled
+        report.rare_rows_preserved = stream_report.rare_rows_preserved
+        report.sample_fraction = stream_report.sample_fraction
+        report.max_rows_per_class = stream_report.max_rows_per_class
+        report.class_counts_scanned = stream_report.class_counts_scanned
+        report.class_counts_kept = stream_report.class_counts_kept
+        report.inf_replaced += stream_report.inf_replaced
+    else:
+        frames: list[pd.DataFrame] = []
+        for path in paths:
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            for chunk in read_csv_chunks(path, chunksize, problems=problems):
+                if guard is not None:
+                    guard.check()
+                frames.append(chunk)
+        if not frames:
+            raise ValueError("input CSV files contained no rows")
+
+        combined = pd.concat(frames, ignore_index=True)
+        del frames
+        if guard is not None:
+            guard.check()
+        cleaned, report = clean_frame(
+            combined, rare_strategy=rare_strategy, problems=problems
+        )
+        del combined
+        cleaned = _apply_sampling(
+            cleaned,
+            sample_fraction=sample_fraction,
+            max_rows_per_class=max_rows_per_class,
+            seed=seed,
+        )
     if cleaned.empty:
         raise ValueError("no rows left after cleaning/sampling")
 
     split = stratified_split(cleaned[LABEL_COLUMN], seed=seed)
-    features = cleaned.loc[:, list(MODEL_FEATURES)].reset_index(drop=True)
+    features = (
+        cleaned.loc[:, list(MODEL_FEATURES)].reset_index(drop=True).astype("float32")
+    )
     labels = cleaned.loc[:, LABEL_COLUMN].astype(str).reset_index(drop=True)
     scaler = fit_scaler(features.iloc[split.train], scaler_type=scaler_type)
     return PreprocessResult(
@@ -452,8 +714,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rare-strategy", choices=RARE_STRATEGIES, default="keep")
     parser.add_argument("--scaler", choices=("standard", "robust"), default="standard")
     parser.add_argument("--seed", type=int, default=settings.ML_RANDOM_SEED)
+    parser.add_argument(
+        "--stream-sample",
+        action="store_true",
+        help="sample/cap each chunk as it is read so peak RAM stays bounded",
+    )
+    parser.add_argument(
+        "--min-available-gb",
+        type=float,
+        default=0.5,
+        help="stop safely when system-wide available RAM drops below this value",
+    )
+    parser.add_argument(
+        "--memory-interval",
+        type=float,
+        default=15.0,
+        help="seconds between background memory samples",
+    )
+    parser.add_argument("--memory-log", type=Path, default=None)
     args = parser.parse_args(argv)
 
+    guard = MemoryGuard(
+        min_available_gb=args.min_available_gb,
+        interval_seconds=args.memory_interval,
+        label="preprocess",
+        log_path=args.memory_log,
+    )
     paths = sorted(args.input_dir.glob("*.csv"))
     result = preprocess(
         paths,
@@ -463,6 +749,8 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         chunksize=args.chunksize or None,
         scaler_type=args.scaler,
+        stream=args.stream_sample,
+        memory_guard=guard,
     )
     save_preprocessing(result, args.output_dir)
     logger.info(

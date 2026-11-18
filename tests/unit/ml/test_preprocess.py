@@ -7,9 +7,16 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from ml import preprocess
-from ml.schema import LABEL_COLUMN, MODEL_FEATURES, RARE_CLASS_LABELS, RARE_GROUP_LABEL
+from ml.schema import (
+    IDENTIFIER_COLUMNS,
+    LABEL_COLUMN,
+    MODEL_FEATURES,
+    RARE_CLASS_LABELS,
+    RARE_GROUP_LABEL,
+)
 
 FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -88,6 +95,77 @@ def test_sampling_options_are_deterministic() -> None:
 
     again = preprocess.preprocess([FIXTURE], seed=3, sample_fraction=0.5)
     pd.testing.assert_frame_equal(fraction.features, again.features)
+
+
+def test_optional_identifier_columns_are_not_schema_problems(tmp_path: Path) -> None:
+    frame = pd.read_csv(FIXTURE)
+    without_ids = frame.loc[
+        :, [c for c in frame.columns if c.strip() not in IDENTIFIER_COLUMNS]
+    ]
+    path = tmp_path / "no_identifiers.csv"
+    without_ids.to_csv(path, index=False)
+
+    result = preprocess.preprocess([path], seed=5)
+    assert not result.report.problems
+    assert list(result.features.columns) == list(MODEL_FEATURES)
+    assert len(result.features) > 0
+
+
+def test_stream_sampling_is_deterministic_and_accounted_for() -> None:
+    first = preprocess.preprocess(
+        [FIXTURE], seed=5, sample_fraction=0.5, chunksize=20, stream=True
+    )
+    again = preprocess.preprocess(
+        [FIXTURE], seed=5, sample_fraction=0.5, chunksize=20, stream=True
+    )
+
+    pd.testing.assert_frame_equal(first.features, again.features)
+    assert first.report.streamed
+    assert first.report.rows_scanned == 194
+    assert 0 < first.report.rows_sampled < first.report.rows_scanned
+    assert first.report.class_counts_scanned
+    assert first.report.sample_fraction == 0.5
+
+
+def test_stream_sampling_preserves_rare_classes() -> None:
+    result = preprocess.preprocess(
+        [FIXTURE], seed=9, sample_fraction=0.01, chunksize=20, stream=True
+    )
+    scanned = result.report.class_counts_scanned
+    labels = set(result.labels)
+    assert result.report.rare_rows_preserved > 0
+    for label in RARE_CLASS_LABELS & set(scanned):
+        assert label in labels
+
+
+def test_stream_sampling_requires_fraction_and_chunksize() -> None:
+    with pytest.raises(ValueError, match="chunksize"):
+        preprocess.preprocess([FIXTURE], sample_fraction=0.5, stream=True)
+    with pytest.raises(ValueError, match="sample_fraction"):
+        preprocess.preprocess([FIXTURE], chunksize=20, stream=True)
+
+
+def test_stream_class_cap_is_deterministic_and_bounded() -> None:
+    first = preprocess.preprocess(
+        [FIXTURE], seed=4, max_rows_per_class=10, chunksize=20, stream=True
+    )
+    again = preprocess.preprocess(
+        [FIXTURE], seed=4, max_rows_per_class=10, chunksize=20, stream=True
+    )
+
+    pd.testing.assert_frame_equal(first.features, again.features)
+    assert first.report.streamed
+    assert first.report.max_rows_per_class == 10
+    assert max(first.report.class_counts_kept.values()) <= 10
+    assert first.report.rows_sampled < first.report.rows_scanned
+    assert first.labels.value_counts().max() <= 10
+
+
+def test_features_and_scaler_statistics_are_float32() -> None:
+    result = preprocess.preprocess([FIXTURE], seed=2)
+    assert set(result.features.dtypes) == {np.dtype("float32")}
+    assert result.scaler.mean_.dtype == np.dtype("float32")
+    assert result.scaler.scale_.dtype == np.dtype("float32")
 
 
 def test_fingerprint_changes_with_file_bytes(tmp_path: Path) -> None:

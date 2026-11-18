@@ -28,19 +28,22 @@ def require_model_manager(actor_user_id: int, db_session: Session) -> User:
     return actor
 
 
-def register_staged_version(
+def record_staged_version(
     version: str,
-    artifact_sources: dict[str, Path],
+    checksums: dict[str, str],
     metadata: dict[str, Any],
     db_session: Session,
     *,
-    root: Path | str | None = None,
     actor_user_id: int | None = None,
 ) -> ModelArtifact:
-    """Stage artifacts on disk and record a non-active registry row."""
+    """Record an already disk-staged version as a non-active registry row.
+
+    Training stages and seals artifacts once in ``store.stage_version``; this
+    function only creates the registry row and audit event, so it must not copy
+    or move artifacts again.
+    """
 
     safe_version = validate_version(version)
-    checksums = store.stage_version(safe_version, artifact_sources, metadata, root)
     prefix = f"staging/{safe_version}/"
     artifact = ModelArtifact(
         version=safe_version,
@@ -80,6 +83,28 @@ def register_staged_version(
         db_session=db_session,
     )
     return artifact
+
+
+def register_staged_version(
+    version: str,
+    artifact_sources: dict[str, Path],
+    metadata: dict[str, Any],
+    db_session: Session,
+    *,
+    root: Path | str | None = None,
+    actor_user_id: int | None = None,
+) -> ModelArtifact:
+    """Stage artifacts on disk and record a non-active registry row."""
+
+    safe_version = validate_version(version)
+    checksums = store.stage_version(safe_version, artifact_sources, metadata, root)
+    return record_staged_version(
+        safe_version,
+        checksums,
+        metadata,
+        db_session,
+        actor_user_id=actor_user_id,
+    )
 
 
 def _rewrite_paths(artifact: ModelArtifact, area: str) -> None:

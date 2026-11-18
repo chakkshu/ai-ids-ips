@@ -18,6 +18,7 @@ import pandas as pd
 
 from core.config import settings
 from ml.schema import (
+    IDENTIFIER_COLUMNS,
     LABEL_COLUMN,
     RAW_COLUMNS,
     canonicalize_columns,
@@ -35,6 +36,7 @@ class FileInspection:
     row_count: int
     columns_match: bool
     missing_columns: list[str]
+    missing_optional_columns: list[str]
     extra_columns: list[str]
     label_counts: dict[str, int]
     problems: list[str]
@@ -61,6 +63,7 @@ def _inspect_file(path: Path) -> FileInspection:
     row_count = 0
     counts: Counter[str] = Counter()
     missing: list[str] = []
+    missing_optional: list[str] = []
     extra: list[str] = []
     columns_match = False
 
@@ -68,11 +71,15 @@ def _inspect_file(path: Path) -> FileInspection:
         header = pd.read_csv(path, nrows=0, encoding_errors="replace")
         raw_columns = [str(column) for column in header.columns]
         canonical = canonicalize_columns(raw_columns)
-        missing = sorted(set(RAW_COLUMNS).difference(canonical))
+        required = set(RAW_COLUMNS).difference(IDENTIFIER_COLUMNS)
+        missing = sorted(required.difference(canonical))
+        # Identifiers are excluded from MODEL_FEATURES; their absence is
+        # informational rather than a schema failure.
+        missing_optional = sorted(IDENTIFIER_COLUMNS.difference(canonical))
         extra = sorted(set(canonical).difference(RAW_COLUMNS))
         columns_match = not missing and not extra
         if missing:
-            problems.append(f"missing columns: {', '.join(missing)}")
+            problems.append(f"missing required columns: {', '.join(missing)}")
         if extra:
             problems.append(f"unexpected columns: {', '.join(extra)}")
 
@@ -115,6 +122,7 @@ def _inspect_file(path: Path) -> FileInspection:
         row_count=row_count,
         columns_match=columns_match,
         missing_columns=missing,
+        missing_optional_columns=missing_optional,
         extra_columns=extra,
         label_counts=dict(sorted(counts.items())),
         problems=problems,
@@ -160,6 +168,14 @@ def format_report(report: DatasetReport) -> str:
         lines.append(
             f"  - {item.name}: {item.row_count} rows, "
             f"{item.size_bytes} bytes, schema_match={item.columns_match}"
+        )
+    omitted = sorted(
+        {name for item in report.files for name in item.missing_optional_columns}
+    )
+    if omitted:
+        lines.append(
+            "Optional identifier columns omitted (not model inputs): "
+            + ", ".join(omitted)
         )
     if report.problems:
         lines.append("Problems:")

@@ -24,6 +24,8 @@ from typing import Any, Literal
 
 import joblib
 import numpy as np
+import pandas as pd
+from joblib import parallel_backend
 from scipy.special import expit
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.metrics import f1_score, make_scorer
@@ -33,18 +35,28 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from core.config import settings
 from core.logging import get_logger
 from ml import evaluate, preprocess
+from ml.memory import MemoryGuard
 from ml.registry import store
-from ml.schema import BENIGN_LABEL, MODEL_FEATURES
+from ml.schema import (
+    BENIGN_LABEL,
+    DEFAULT_FEATURE_VARIANT,
+    DESTINATION_PORT,
+    FEATURE_VARIANTS,
+    MODEL_FEATURES,
+    features_for_variant,
+)
 
 logger = get_logger(__name__)
 
 ResamplingStrategy = Literal["none", "smote", "undersample"]
 
 DEFAULT_PARAM_DISTRIBUTIONS: dict[str, list[Any]] = {
-    "n_estimators": [100, 200, 300],
-    "max_depth": [None, 12, 20],
-    "min_samples_split": [2, 5, 10],
-    "min_samples_leaf": [1, 2, 4],
+    "n_estimators": [100, 200],
+    # Bounded depth/leaf sizes keep each forest small enough for the
+    # memory budget while still giving RandomizedSearchCV a useful grid.
+    "max_depth": [8, 12],
+    "min_samples_split": [5, 10],
+    "min_samples_leaf": [2, 4, 8],
     "max_features": ["sqrt", 0.5],
 }
 
@@ -72,6 +84,11 @@ class TrainingConfig:
     confidence_threshold: float
     anomaly_threshold: float
     smoke_test: bool = False
+    feature_variant: str = DEFAULT_FEATURE_VARIANT
+    max_trees: int = 200
+    min_available_gb: float = 0.5
+    memory_interval_seconds: float = 15.0
+    memory_log_path: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -263,10 +280,41 @@ def train_pipeline(
     *,
     registry_root: Path | None,
 ) -> TrainingResult:
-    """Run the full training pipeline and stage the resulting artifacts."""
+    """Run the full training pipeline with a fail-safe memory guard."""
+
+    guard = MemoryGuard(
+        min_available_gb=config.min_available_gb,
+        interval_seconds=config.memory_interval_seconds,
+        label=f"train-{config.version}",
+        log_path=Path(config.memory_log_path) if config.memory_log_path else None,
+    )
+    guard.start()
+    try:
+        return _train_pipeline_impl(
+            processed_dir,
+            work_dir,
+            config,
+            registry_root=registry_root,
+            guard=guard,
+        )
+    finally:
+        guard.stop()
+
+
+def _train_pipeline_impl(
+    processed_dir: Path,
+    work_dir: Path,
+    config: TrainingConfig,
+    *,
+    registry_root: Path | None,
+    guard: MemoryGuard | None = None,
+) -> TrainingResult:
+    """Stage one model version; never promotes or activates it."""
 
     if config.n_iter < 1 or config.cv_folds < 2:
         raise ValueError("n_iter must be >= 1 and cv_folds must be >= 2")
+    if config.max_trees < 1:
+        raise ValueError("max_trees must be >= 1")
 
     bundle = preprocess.load_preprocessing(Path(processed_dir))
     features: Any = bundle["features"]
@@ -279,10 +327,21 @@ def train_pipeline(
         raise ValueError(
             "saved feature contract does not match ml.schema.MODEL_FEATURES"
         )
+    variant_features = features_for_variant(config.feature_variant)
 
-    train_raw = features.iloc[split.train].to_numpy(dtype="float64")
-    validation_raw = features.iloc[split.validation].to_numpy(dtype="float64")
-    test_raw = features.iloc[split.test].to_numpy(dtype="float64")
+    # The processed bundle holds the full 78-column matrix so both variants
+    # train/evaluate on exactly the same cleaned rows and split indices.
+    train_raw = features.iloc[split.train][list(variant_features)].to_numpy(
+        dtype="float32"
+    )
+    validation_raw = features.iloc[split.validation][list(variant_features)].to_numpy(
+        dtype="float32"
+    )
+    test_raw = features.iloc[split.test][list(variant_features)].to_numpy(
+        dtype="float32"
+    )
+    if guard is not None:
+        guard.check()
     y_train = labels.iloc[split.train].to_numpy()
     y_validation = labels.iloc[split.validation].to_numpy()
     y_test = labels.iloc[split.test].to_numpy()
@@ -291,6 +350,13 @@ def train_pipeline(
     y_train_encoded = encoder.transform(y_train)
     y_test_encoded = encoder.transform(y_test)
 
+    # The saved scaler was fitted on all 78 columns. scaler statistics are
+    # per-column, so refit the same scaler type on this variant's training rows
+    # only; validation/test rows are still transformed, never fitted.
+    scaler = preprocess.fit_scaler(
+        pd.DataFrame(train_raw, columns=list(variant_features)),
+        scaler_type=str(metadata.get("scaler_type", "standard")),
+    )
     x_train_scaled = scaler.transform(train_raw)
     x_validation_scaled = scaler.transform(validation_raw)
     x_test_scaled = scaler.transform(test_raw)
@@ -309,14 +375,31 @@ def train_pipeline(
         )
 
     class_weight: str | None = None if config.resampling != "none" else "balanced"
+    # Hard ceiling on trees; a mistyped or inherited distribution cannot
+    # silently exceed the reviewed memory budget.
+    param_distributions = {
+        name: [
+            value
+            for value in values
+            if name != "n_estimators" or int(value) <= config.max_trees
+        ]
+        for name, values in config.param_distributions.items()
+    }
+    if (
+        "n_estimators" in param_distributions
+        and not param_distributions["n_estimators"]
+    ):
+        raise ValueError(f"no n_estimators value <= max_trees={config.max_trees}")
     forest = RandomForestClassifier(
         random_state=config.seed,
         class_weight=class_weight,
         n_jobs=1,
     )
+    if guard is not None:
+        guard.check()
     search = RandomizedSearchCV(
         estimator=forest,
-        param_distributions=config.param_distributions,
+        param_distributions=param_distributions,
         n_iter=config.n_iter,
         scoring=make_scorer(f1_score, average="macro", zero_division=0),
         cv=StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=config.seed),
@@ -325,7 +408,12 @@ def train_pipeline(
         refit=True,
         error_score="raise",
     )
-    search.fit(x_resampled, y_resampled)
+    # Threading backend keeps n_jobs=2 without serialising a whole forest into
+    # a second worker process; the forest itself stays single-threaded.
+    with parallel_backend("threading"):
+        search.fit(x_resampled, y_resampled)
+    if guard is not None:
+        guard.check()
     model = search.best_estimator_
 
     benign_mask = y_train == BENIGN_LABEL
@@ -339,6 +427,8 @@ def train_pipeline(
         random_state=config.seed,
         n_jobs=config.n_jobs,
     )
+    if guard is not None:
+        guard.check()
     isolation.fit(x_train_scaled[benign_mask])
     benign_train_scores = _anomaly_scores(isolation, x_train_scaled[benign_mask])
     validation_scores = _anomaly_scores(isolation, x_validation_scaled)
@@ -372,23 +462,37 @@ def train_pipeline(
         validation_raw,
         validation_proba,
         encoder.classes_,
-        list(MODEL_FEATURES),
+        list(variant_features),
     )
 
     work_dir.mkdir(parents=True, exist_ok=True)
     evaluate.write_metrics(metrics, work_dir)
+    port_note = (
+        "Destination Port is included because it is available at flow creation; "
+        "dataset-specific port bias is documented in docs/ml_pipeline.md"
+        if DESTINATION_PORT in variant_features
+        else "Destination Port is excluded to test lab port-bias sensitivity; "
+        "see docs/phase4-report.md for the like-for-like comparison"
+    )
     feature_contract = {
-        "features": list(MODEL_FEATURES),
-        "feature_count": len(MODEL_FEATURES),
+        "feature_variant": config.feature_variant,
+        "features": list(variant_features),
+        "feature_count": len(variant_features),
         "label_column": "Label",
         "impute_values": np.nanmedian(train_raw, axis=0).tolist(),
-        "destination_port_note": (
-            "Destination Port is included because it is available at flow "
-            "creation; dataset-specific port bias is documented in docs/ml_pipeline.md"
-        ),
+        "destination_port_note": port_note,
     }
     config_payload: dict[str, Any] = {
         **config.as_dict(),
+        "variant_feature_count": len(variant_features),
+        "effective_param_distributions": _json_safe(param_distributions),
+        "processed_feature_variant": metadata.get("feature_variant", "full"),
+        "preprocessing_streamed": metadata["cleaning"].get("streamed", False),
+        "preprocessing_sample_fraction": metadata["cleaning"].get("sample_fraction"),
+        "preprocessing_max_rows_per_class": metadata["cleaning"].get(
+            "max_rows_per_class"
+        ),
+        "rows_scanned": metadata["cleaning"].get("rows_scanned", len(features)),
         "cv_folds_used": cv_folds,
         "effective_class_weight": class_weight,
         "resampling_detail": resampling_info,
@@ -440,7 +544,8 @@ def train_pipeline(
     )
     stage_metadata = {
         "algorithm": "RandomForestClassifier",
-        "feature_names": list(MODEL_FEATURES),
+        "feature_variant": config.feature_variant,
+        "feature_names": list(variant_features),
         "metrics": metrics,
         "dataset_hash": config_payload["dataset_hash"],
         "git_commit": config_payload["git_commit"],
@@ -449,8 +554,10 @@ def train_pipeline(
     checksums = store.stage_version(config.version, artifacts, stage_metadata, root)
     staging_dir = store.version_directory(config.version, root, area="staging")
     logger.info(
-        "Staged version %s (train=%d, resampled=%d, test=%d, cv=%d)",
+        "Staged version %s (variant=%s, features=%d, train=%d, resampled=%d, test=%d, cv=%d)",
         config.version,
+        config.feature_variant,
+        len(variant_features),
         len(y_train),
         len(y_resampled),
         len(y_test),
@@ -469,24 +576,25 @@ def _register_staged(
     result: TrainingResult,
     db_session: Any,
     *,
-    root: Path,
     actor_user_id: int | None,
 ) -> None:
     from ml.registry import service
 
-    service.register_staged_version(
+    service.record_staged_version(
         result.version,
-        {name: result.staging_dir / name for name in result.checksums},
+        result.checksums,
         {
             "algorithm": "RandomForestClassifier",
-            "feature_names": list(MODEL_FEATURES),
+            "feature_variant": result.config["feature_variant"],
+            "feature_names": list(
+                features_for_variant(str(result.config["feature_variant"]))
+            ),
             "metrics": result.metrics,
             "dataset_hash": result.config["dataset_hash"],
             "git_commit": result.config.get("git_commit"),
             "training_config": result.config,
         },
         db_session,
-        root=root,
         actor_user_id=actor_user_id,
     )
 
@@ -500,6 +608,7 @@ def smoke_test(
     cv_folds: int = 2,
     seed: int = settings.ML_RANDOM_SEED,
     resampling: ResamplingStrategy = "none",
+    feature_variant: str = DEFAULT_FEATURE_VARIANT,
 ) -> TrainingResult:
     """End-to-end pipeline exercise on the labelled test fixture only."""
 
@@ -536,6 +645,7 @@ def smoke_test(
         confidence_threshold=settings.ML_CONFIDENCE_THRESHOLD,
         anomaly_threshold=settings.ML_ANOMALY_SCORE_THRESHOLD,
         smoke_test=True,
+        feature_variant=feature_variant,
     )
     return train_pipeline(
         processed_dir,
@@ -554,9 +664,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--work-dir", type=Path, default=None)
     parser.add_argument("--version", default=None)
     parser.add_argument("--seed", type=int, default=settings.ML_RANDOM_SEED)
-    parser.add_argument("--n-iter", type=int, default=10)
-    parser.add_argument("--cv-folds", type=int, default=5)
-    parser.add_argument("--n-jobs", type=int, default=-1)
+    parser.add_argument("--n-iter", type=int, default=8)
+    parser.add_argument("--cv-folds", type=int, default=3)
+    parser.add_argument("--n-jobs", type=int, default=2)
+    parser.add_argument("--max-trees", type=int, default=200)
+    parser.add_argument("--min-available-gb", type=float, default=0.5)
+    parser.add_argument("--memory-interval", type=float, default=15.0)
+    parser.add_argument("--memory-log", type=Path, default=None)
     parser.add_argument(
         "--resampling",
         choices=("none", "smote", "undersample"),
@@ -570,6 +684,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--anomaly-threshold", type=float, default=settings.ML_ANOMALY_SCORE_THRESHOLD
+    )
+    parser.add_argument(
+        "--feature-variant",
+        choices=sorted(FEATURE_VARIANTS),
+        default=DEFAULT_FEATURE_VARIANT,
     )
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--fixture", type=Path, default=FIXTURE_PATH)
@@ -594,6 +713,7 @@ def main(argv: list[str] | None = None) -> int:
                 cv_folds=args.cv_folds,
                 seed=args.seed,
                 resampling=args.resampling,
+                feature_variant=args.feature_variant,
             )
             register = False
         else:
@@ -611,6 +731,11 @@ def main(argv: list[str] | None = None) -> int:
                 param_distributions=DEFAULT_PARAM_DISTRIBUTIONS,
                 confidence_threshold=args.confidence_threshold,
                 anomaly_threshold=args.anomaly_threshold,
+                feature_variant=args.feature_variant,
+                max_trees=args.max_trees,
+                min_available_gb=args.min_available_gb,
+                memory_interval_seconds=args.memory_interval,
+                memory_log_path=str(args.memory_log) if args.memory_log else None,
             )
             result = train_pipeline(
                 args.processed_dir,
@@ -627,7 +752,6 @@ def main(argv: list[str] | None = None) -> int:
                 _register_staged(
                     result,
                     session,
-                    root=args.registry_root,
                     actor_user_id=args.actor_id,
                 )
 

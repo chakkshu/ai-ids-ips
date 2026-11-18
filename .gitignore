@@ -77,6 +77,10 @@ data/processed/*.npz
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
+# Generated preprocessing bundles and evaluation reports
+artifacts/
+reports/
+
 # ML Model Registry artifacts (generated files, never commit)
 ml/models/*
 !ml/models/.gitkeep

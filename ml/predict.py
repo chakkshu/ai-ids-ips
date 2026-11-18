@@ -24,7 +24,7 @@ from core.config import settings
 from ml.registry import store
 from ml.registry.errors import ChecksumError
 from ml.registry.paths import validate_filename
-from ml.schema import BENIGN_LABEL, MODEL_FEATURES
+from ml.schema import BENIGN_LABEL, DEFAULT_FEATURE_VARIANT, features_for_variant
 
 Verdict = str
 
@@ -51,6 +51,7 @@ class ModelBundle:
     encoder: Any
     isolation: dict[str, Any]
     feature_names: list[str]
+    feature_variant: str
     impute_values: np.ndarray
     feature_importances: np.ndarray
     confidence_threshold: float
@@ -81,7 +82,7 @@ class ModelBundle:
                 self._check_columns(list(item.keys()))
             frame = pd.DataFrame(rows, columns=self.feature_names)
         else:
-            array = np.asarray(flows, dtype="float64")
+            array = np.asarray(flows, dtype="float32")
             if array.ndim == 1:
                 array = array.reshape(1, -1)
             if array.ndim != 2 or array.shape[1] != len(self.feature_names):
@@ -90,7 +91,7 @@ class ModelBundle:
                 )
             frame = pd.DataFrame(array, columns=self.feature_names)
 
-        values = frame.to_numpy(dtype="float64", copy=True)
+        values = frame.to_numpy(dtype="float32", copy=True)
         values[~np.isfinite(values)] = np.nan
         nan_rows, nan_columns = np.where(np.isnan(values))
         if len(nan_rows):
@@ -137,7 +138,7 @@ class ModelBundle:
         values = self._coerce_batch(flows)
         if len(values) == 0:
             return []
-        scaled = np.asarray(self.scaler.transform(values), dtype="float64")
+        scaled = np.asarray(self.scaler.transform(values), dtype="float32")
         probabilities = np.asarray(self.model.predict_proba(scaled), dtype="float64")
         predicted_indices = probabilities.argmax(axis=1)
         labels = [
@@ -213,10 +214,19 @@ def load_artifacts_from_directory(directory: Path | str) -> ModelBundle:
     features_contract = json.loads(
         (directory / "features.json").read_text(encoding="utf-8")
     )
+    config = json.loads((directory / "config.json").read_text(encoding="utf-8"))
+    # Older artifacts have no variant field; they used the original full
+    # 78-feature contract, so defaulting to "full" preserves compatibility.
+    feature_variant = str(
+        features_contract.get("feature_variant")
+        or config.get("feature_variant")
+        or DEFAULT_FEATURE_VARIANT
+    )
+    expected_features = features_for_variant(feature_variant)
     feature_names = [str(name) for name in features_contract["features"]]
-    if feature_names != list(MODEL_FEATURES):
+    if feature_names != list(expected_features):
         raise ChecksumError(
-            "saved feature contract does not match ml.schema.MODEL_FEATURES"
+            f"saved feature contract does not match feature variant {feature_variant!r}"
         )
     impute_values = np.asarray(
         features_contract.get("impute_values", np.zeros(len(feature_names))),
@@ -225,7 +235,6 @@ def load_artifacts_from_directory(directory: Path | str) -> ModelBundle:
     if len(impute_values) != len(feature_names):
         raise ChecksumError("saved imputation vector length does not match features")
 
-    config = json.loads((directory / "config.json").read_text(encoding="utf-8"))
     importance = getattr(model, "feature_importances_", None)
     importances = (
         np.asarray(importance, dtype="float64")
@@ -239,6 +248,7 @@ def load_artifacts_from_directory(directory: Path | str) -> ModelBundle:
         encoder=encoder,
         isolation=isolation,
         feature_names=feature_names,
+        feature_variant=feature_variant,
         impute_values=impute_values,
         feature_importances=importances,
         confidence_threshold=float(

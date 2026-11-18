@@ -6,11 +6,14 @@ import pytest
 
 from ml.schema import (
     CANONICAL_LABELS,
+    DESTINATION_PORT,
+    FEATURE_VARIANTS,
     IDENTIFIER_COLUMNS,
     MODEL_FEATURES,
     RAW_COLUMNS,
     RAW_FEATURE_NAMES,
     canonicalize_columns,
+    features_for_variant,
     is_known_label,
     normalize_label,
 )
@@ -48,6 +51,20 @@ def test_label_normalization(raw: str, expected: str) -> None:
 def test_unknown_label_is_not_silently_renamed() -> None:
     assert normalize_label("Totally New Attack") == "Totally New Attack"
     assert not is_known_label("Totally New Attack")
+
+
+def test_feature_variants_are_ordered_subsets() -> None:
+    assert list(features_for_variant("full")) == list(MODEL_FEATURES)
+    no_port = features_for_variant("no_destination_port")
+    assert len(no_port) == 77
+    assert DESTINATION_PORT not in no_port
+    assert no_port == tuple(f for f in MODEL_FEATURES if f != DESTINATION_PORT)
+    assert set(FEATURE_VARIANTS) == {"full", "no_destination_port"}
+
+
+def test_unknown_feature_variant_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown feature variant"):
+        features_for_variant("no_such_variant")
 
 
 def test_canonicalize_columns_handles_whitespace_and_duplicate() -> None:

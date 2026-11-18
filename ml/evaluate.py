@@ -245,9 +245,11 @@ def main(argv: list[str] | None = None) -> int:
     bundle = load_artifacts_from_directory(args.artifact_dir)
     payload = joblib_load_processed(args.processed_dir)
     indices = payload["split"].test
-    features = payload["features"].iloc[indices]
+    # The saved contract may be a 77-feature variant; select by saved name so
+    # the held-out matrix matches exactly the one used during training.
+    features = payload["features"].loc[:, bundle.feature_names].iloc[indices]
     labels = payload["labels"].iloc[indices].to_numpy()
-    scaled = bundle.scaler.transform(features.to_numpy(dtype="float64"))
+    scaled = bundle.scaler.transform(features.to_numpy(dtype="float32"))
     started = time.perf_counter()
     probabilities = bundle.model.predict_proba(scaled)
     batch_seconds = time.perf_counter() - started
