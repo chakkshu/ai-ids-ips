@@ -333,6 +333,50 @@ def cmd_natural_fpr(args: argparse.Namespace) -> int:
     return natural_fpr_main(argv)
 
 
+def cmd_registry_record(args: argparse.Namespace) -> int:
+    """Record an already-staged artifact in ModelArtifact; never activates it."""
+
+    import json
+    from pathlib import Path
+
+    from core.db import get_db_session
+    from core.models.mlops import ModelArtifact
+    from ml.registry import store
+    from ml.registry.service import record_staged_version
+
+    root = Path(args.registry_root)
+    version = args.version
+    directory = store.version_directory(version, root, area="staging")
+    checksums = json.loads(
+        (directory / store.CHECKSUMS_FILE).read_text(encoding="utf-8")
+    )
+    metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+
+    with get_db_session() as session:
+        existing = session.query(ModelArtifact).filter_by(version=version).one_or_none()
+        if existing is not None:
+            payload = {
+                "version": version,
+                "status": existing.status,
+                "already_recorded": True,
+            }
+        else:
+            artifact = record_staged_version(
+                version,
+                checksums,
+                metadata,
+                session,
+                actor_user_id=args.actor_id,
+            )
+            payload = {
+                "version": artifact.version,
+                "status": artifact.status,
+                "already_recorded": False,
+            }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_registry_list(args: argparse.Namespace) -> int:
     """List registered ML model artifacts and their lifecycle states."""
 
@@ -568,6 +612,14 @@ def main() -> int:
     natural_p.add_argument("--memory-interval", type=float, default=15.0)
     natural_p.add_argument("--memory-log", default=None)
     natural_p.set_defaults(func=cmd_natural_fpr)
+
+    record_p = subparsers.add_parser(
+        "registry-record", help="Record an already-staged version (never activates)"
+    )
+    record_p.add_argument("--version", required=True)
+    record_p.add_argument("--registry-root", default=settings.ML_MODEL_REGISTRY_PATH)
+    record_p.add_argument("--actor-id", type=int, default=None)
+    record_p.set_defaults(func=cmd_registry_record)
 
     list_p = subparsers.add_parser(
         "registry-list", help="List registered model versions and statuses"

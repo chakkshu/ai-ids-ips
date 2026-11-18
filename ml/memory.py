@@ -87,7 +87,8 @@ class MemoryGuard:
         self.sample_count = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        # Re-entrant because ``_sample`` writes while already holding it.
+        self._lock = threading.RLock()
 
     def start(self) -> Self:
         """Start the sampling thread and take an immediate baseline sample."""

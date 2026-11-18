@@ -53,16 +53,16 @@ def natural_benign_fpr(
         raise ValueError("no input CSV files supplied")
 
     rng = np.random.default_rng(seed)
-    sampled: list[pd.DataFrame] = []
+    reservoir: pd.DataFrame | None = None
+    reservoir_keys: np.ndarray | None = None
     rows_scanned = 0
-    rows_sampled = 0
     benign_available = 0
 
+    # Reservoir over *all* BENIGN rows in every file. Stopping at the first
+    # chunk would bias the sample to a single capture window.
     for path in paths:
         if not path.is_file():
             raise FileNotFoundError(path)
-        if rows_sampled >= max_rows:
-            break
         for chunk in preprocess.read_csv_chunks(path, chunksize, problems=findings):
             if guard is not None:
                 guard.check()
@@ -70,21 +70,25 @@ def natural_benign_fpr(
             chunk[LABEL_COLUMN] = chunk[LABEL_COLUMN].map(normalize_label)
             benign = chunk.loc[chunk[LABEL_COLUMN] == BENIGN_LABEL, feature_names]
             benign_available += len(benign)
-            remaining = max_rows - rows_sampled
-            if benign.empty or remaining <= 0:
+            if benign.empty:
                 continue
-            if len(benign) > remaining:
-                selected = rng.choice(len(benign), size=remaining, replace=False)
-                benign = benign.iloc[selected]
-            sampled.append(benign.astype("float32"))
-            rows_sampled += len(benign)
-            if rows_sampled >= max_rows:
-                break
+            incoming = benign.astype("float32").reset_index(drop=True)
+            incoming_keys = rng.random(len(incoming))
+            if reservoir is None or reservoir_keys is None:
+                reservoir, reservoir_keys = incoming, incoming_keys
+                continue
+            all_rows = pd.concat([reservoir, incoming], ignore_index=True)
+            all_keys = np.concatenate([reservoir_keys, incoming_keys])
+            if len(all_keys) > max_rows:
+                selected = np.argpartition(all_keys, max_rows - 1)[:max_rows]
+                all_rows = all_rows.iloc[selected].reset_index(drop=True)
+                all_keys = all_keys[selected]
+            reservoir, reservoir_keys = all_rows, all_keys
 
-    if not sampled:
+    if reservoir is None:
         raise ValueError("no BENIGN rows found in the supplied CSV files")
-    matrix = pd.concat(sampled, ignore_index=True).to_numpy(dtype="float32", copy=True)
-    del sampled
+    matrix = reservoir.to_numpy(dtype="float32", copy=True)
+    del reservoir
     matrix[~np.isfinite(matrix)] = np.nan
     nan_rows, nan_columns = np.where(np.isnan(matrix))
     if len(nan_rows):
@@ -102,8 +106,8 @@ def natural_benign_fpr(
         "feature_variant": bundle.feature_variant,
         "feature_count": len(feature_names),
         "sampling": (
-            "uniform random sample of raw BENIGN rows; no per-class cap and no "
-            "train/validation/test reuse"
+            "seeded reservoir sample of raw BENIGN rows across all input CSVs; "
+            "no per-class cap and no train/validation/test reuse"
         ),
         "rows_scanned": rows_scanned,
         "benign_rows_available": benign_available,
