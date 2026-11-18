@@ -77,12 +77,14 @@ data/processed/*.npz
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
-# ML Model Registry serialized binaries (large files)
-ml/models/*.joblib
-ml/models/*.pkl
-ml/registry/*/*.joblib
-!ml/registry/.gitkeep
+# ML Model Registry artifacts (generated files, never commit)
+ml/models/*
 !ml/models/.gitkeep
+ml/registry/staging/
+ml/registry/active/
+ml/registry/archive/
+ml/registry/active.json
+!ml/registry/.gitkeep
 
 # OS generated files
 Thumbs.db
