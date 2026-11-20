@@ -15,7 +15,7 @@ from core.config import settings
 from core.db import get_db_session
 from core.events import SIMULATION_TAG, PreventionCandidateEvent, RawFlowEvent
 from core.models.detection import Detection
-from core.streams import RedisStreamIO, StreamLimits
+from core.streams import RedisStreamIO, StreamConsumer, StreamLimits
 from ml.predict import ModelCache, Prediction
 from ml.registry import store
 from ml.registry.paths import registry_root, version_directory
@@ -284,3 +284,74 @@ def test_rare_class_candidates_require_explicit_operator_flag(
         candidate.model_dump(mode="json"),
     ]
     assert all(SIMULATION_TAG in event["tags"] for event in emitted)
+
+
+def test_batch_results_match_single_flow_results_on_same_rows(pipeline: Any) -> None:
+    rows = [*load_test_rows(limit=3)]
+    payloads = [simulated_event(row).model_dump(mode="json") for row in rows]
+
+    singles = [pipeline.engine.process_event(payload) for payload in payloads]
+    batched = pipeline.engine.process_events(payloads)
+
+    assert len(batched) == len(singles)
+    for single, batch in zip(singles, batched):
+        assert not isinstance(batch, BaseException)
+        assert batch.predicted_label == single.predicted_label
+        assert batch.verdict == single.verdict
+        assert batch.confidence_score == pytest.approx(single.confidence_score)
+        assert batch.anomaly_score == pytest.approx(single.anomaly_score)
+        assert [name for name, _ in batch.top_features] == [
+            name for name, _ in single.top_features
+        ]
+        assert [value for _, value in batch.top_features] == pytest.approx(
+            [value for _, value in single.top_features]
+        )
+        assert batch.detection_id == single.detection_id
+
+
+def test_batch_dead_letters_one_bad_flow_without_dropping_valid_flows(
+    pipeline: Any, held_out_event: RawFlowEvent
+) -> None:
+    consumer = StreamConsumer(
+        pipeline.client,
+        "raw-flows",
+        "test-batch-group",
+        "test-batch-consumer",
+        dead_letter_stream="raw-flows:dead-letter",
+        limits=StreamLimits(
+            maxlen=100, max_pending=50, retry_limit=3, batch_size=10, block_ms=0
+        ),
+    )
+    good_payload = held_out_event.model_dump(mode="json")
+    other_payload = held_out_event.model_dump(mode="json")
+    other_payload["event_id"] = f"{held_out_event.event_id}-other"
+    other_payload["flow_id"] = f"{held_out_event.flow_id}-other"
+    bad_payload = held_out_event.model_dump(mode="json")
+    bad_payload["event_id"] = f"{held_out_event.event_id}-bad"
+    bad_payload["features"] = {
+        **bad_payload["features"],
+        "Destination Port": 443.0,
+    }
+
+    for payload in (good_payload, bad_payload, other_payload):
+        consumer.publish(payload)
+
+    reports = [
+        consumer.process_batch(pipeline.engine.handle_batch, block_ms=0)
+        for _ in range(3)
+    ]
+
+    assert [report.processed for report in reports] == [2, 0, 0]
+    assert [report.retried for report in reports] == [1, 1, 0]
+    assert [report.dead_lettered for report in reports] == [0, 0, 1]
+    assert consumer.pending_count() == 0
+    assert pipeline.detections.stream_length() == 2
+
+    with get_db_session() as session:
+        assert session.query(Detection).count() == 2
+
+    dead_entries = pipeline.client.xrange(consumer.dead_letter_stream)
+    assert len(dead_entries) == 1
+    dead_letter = json.loads(dead_entries[0][1]["event"])
+    assert dead_letter["original_event_id"] == bad_payload["event_id"]
+    assert "feature contract violation" in dead_letter["error"]

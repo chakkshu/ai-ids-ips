@@ -120,6 +120,36 @@ def test_consumer_acks_successfully_handled_messages(client: Any) -> None:
     assert consumer.pending_count() == 0
 
 
+def test_consumer_process_batch_keeps_per_message_outcomes(client: Any) -> None:
+    consumer = StreamConsumer(
+        client,
+        "test-flows",
+        "test-group",
+        "test-consumer",
+        dead_letter_stream="test-flows:dead-letter",
+        limits=StreamLimits(batch_size=4, block_ms=0),
+    )
+    for event_id in ("flow-1", "flow-2", "flow-3"):
+        consumer.publish(_raw_event(event_id))
+
+    def handler(
+        items: list[tuple[dict[str, Any], str]],
+    ) -> dict[str, BaseException | None]:
+        return {
+            message_id: (
+                RuntimeError("bad flow") if payload["event_id"] == "flow-2" else None
+            )
+            for payload, message_id in items
+        }
+
+    report = consumer.process_batch(handler, block_ms=0)
+
+    assert report.processed == 2
+    assert report.retried == 1
+    assert report.dead_lettered == 0
+    assert consumer.pending_count() == 1
+
+
 def test_consumer_retries_then_dead_letters_and_acks_original(client: Any) -> None:
     retry_limit = 3
     consumer = StreamConsumer(

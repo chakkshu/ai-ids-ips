@@ -8,7 +8,7 @@ usable with a real ``redis.Redis`` client or ``fakeredis.FakeRedis`` in tests.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,6 +58,10 @@ class ProcessingReport:
     retried: int = 0
     dead_lettered: int = 0
     skipped: int = 0
+
+
+BatchItem = tuple[dict[str, Any], str]
+BatchHandler = Callable[[Sequence[BatchItem]], Mapping[str, BaseException | None]]
 
 
 def _as_text(value: Any) -> str:
@@ -253,34 +257,94 @@ class StreamConsumer(RedisStreamIO):
         *,
         block_ms: int | None = None,
     ) -> ProcessingReport:
-        """Process new and pending messages, acking successes only."""
+        """Process new and pending messages one at a time, acking successes."""
 
         self.ensure_group()
         report = ProcessingReport()
-        seen: set[str] = set()
-        messages = [*self.read_new(block_ms=block_ms), *self.read_pending()]
+        messages, report.skipped = self._messages(block_ms=block_ms)
         for message in messages:
-            if message.message_id in seen:
-                report.skipped += 1
-                continue
-            seen.add(message.message_id)
             try:
                 handler(message.payload, message.message_id)
             except Exception as exc:  # noqa: BLE001 - dead-letter boundary
-                attempts = self._attempts.get(message.message_id, 0) + 1
-                self._attempts[message.message_id] = attempts
-                if attempts >= self.limits.retry_limit:
-                    self.dead_letter(message, exc, attempts)
-                    self.ack(message.message_id)
-                    self._attempts.pop(message.message_id, None)
-                    report.dead_lettered += 1
-                else:
-                    report.retried += 1
+                self._record_outcome(message, exc, report)
             else:
-                self.ack(message.message_id)
-                self._attempts.pop(message.message_id, None)
-                report.processed += 1
+                self._record_outcome(message, None, report)
         return report
+
+    def process_batch(
+        self,
+        handler: BatchHandler,
+        *,
+        block_ms: int | None = None,
+    ) -> ProcessingReport:
+        """Process one stream batch with per-message success/failure outcomes.
+
+        The handler receives ``(payload, message_id)`` pairs and returns a map
+        from message id to ``None`` (success) or the exception for that message.
+        A batch-level exception is applied to every message in the batch, which
+        preserves retry/dead-letter behavior without dropping valid events.
+        """
+
+        self.ensure_group()
+        report = ProcessingReport()
+        messages, report.skipped = self._messages(block_ms=block_ms)
+        if not messages:
+            return report
+
+        items: list[BatchItem] = [
+            (message.payload, message.message_id) for message in messages
+        ]
+        try:
+            outcomes: Mapping[str, BaseException | None] = handler(items)
+        except Exception as exc:  # noqa: BLE001 - dead-letter boundary
+            outcomes = {message.message_id: exc for message in messages}
+
+        for message in messages:
+            error = outcomes.get(message.message_id)
+            if error is not None and not isinstance(error, BaseException):
+                error = RuntimeError(
+                    f"batch handler returned a non-exception outcome: {error!r}"
+                )
+            self._record_outcome(message, error, report)
+        return report
+
+    def _messages(self, *, block_ms: int | None) -> tuple[list[StreamMessage], int]:
+        """Read new and pending entries once, deduplicating message ids."""
+
+        seen: set[str] = set()
+        selected: list[StreamMessage] = []
+        skipped = 0
+        for message in [*self.read_new(block_ms=block_ms), *self.read_pending()]:
+            if message.message_id in seen:
+                skipped += 1
+                continue
+            seen.add(message.message_id)
+            selected.append(message)
+        return selected, skipped
+
+    def _record_outcome(
+        self,
+        message: StreamMessage,
+        error: BaseException | None,
+        report: ProcessingReport,
+    ) -> None:
+        """Apply the shared ack/retry/dead-letter policy for one message."""
+
+        if error is None:
+            self.ack(message.message_id)
+            self._attempts.pop(message.message_id, None)
+            report.processed += 1
+            return
+
+        attempts = self._attempts.get(message.message_id, 0) + 1
+        self._attempts[message.message_id] = attempts
+        if attempts >= self.limits.retry_limit:
+            self.dead_letter(message, error, attempts)
+            self.ack(message.message_id)
+            self._attempts.pop(message.message_id, None)
+            report.dead_lettered += 1
+        else:
+            report.retried += 1
 
 
 def consumer_from_settings(

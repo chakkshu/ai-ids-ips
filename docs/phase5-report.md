@@ -22,6 +22,10 @@ No training was run and the active model pointer/artifacts were not changed.
   `Detection` rows with `model_version`, emits detection and dry-run prevention
   candidate events, applies the documented confidence rule, and gates rare
   classes behind an explicit flag.
+- Batch path: `StreamConsumer.process_batch()` calls one engine batch handler;
+  `DetectionEngine.process_events()` uses one `ModelBundle.predict_batch()` and
+  one database commit per stream batch. Per-message failures are still returned
+  to the consumer for retry/dead-letter, so one bad flow does not drop the rest.
 - Verdicts: `known attack`, `benign`, `anomaly`, `uncertain`. The documented
   low-confidence rule is `confidence < 0.7` (active model
   `confidence_threshold`), producing `uncertain` and no blocking candidate.
@@ -46,12 +50,43 @@ impact. Key points:
   payload-activity features are approximations from IP/TCP headers and arrival
   times, with zero defaults where undefined.
 - Simulation replay bypasses the live flow meter and uses the original
-  processed TEST rows, so the benchmark below measures inference/transport, not
+  processed TEST rows, so the benchmarks below measure inference/transport, not
   live feature-extraction fidelity.
 - Any live feature difference from the CICFlowMeter-derived training
   distribution can reduce accuracy; low-support classes are especially weak.
+- Manual live-capture steps are in `docs/live-capture-test.md`.
 
-## Benchmarks (real numbers, this machine, 2026-11-21)
+## Deselected Phase 4 smoke test
+
+Initial available RAM was **1.1575 GB** (`total_gb=7.7467`, `percent_used=85.1`),
+above the existing 0.50 GB guard. Command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/unit/ml/test_train_evaluate_smoke.py::test_natural_benign_fpr_scores_raw_benign_rows -q
+```
+
+Result:
+
+```text
+.                                                                        [100%]
+1 passed in 5.64s
+```
+
+The test was listed as “deselected for memory” only until this passing rerun.
+No guard threshold was changed and no environment-variable override was added.
+
+## Throughput investigation and batching
+
+### Benchmark correction
+
+The earlier `3.39 flows/s` / `3.01 flows/s` numbers were distorted by a
+benchmark fixture that called `Base.metadata.create_all()` on every event
+(400 calls, about 65 s of an 84 s profile). `services/detection_engine/benchmark.py`
+now creates the temporary SQLite schema once and yields a fresh session per
+scope. The corrected single-flow baseline on the same 200 held-out TEST rows is
+the valid “before” number.
+
+### Before (single-flow processing)
 
 Command:
 
@@ -59,53 +94,230 @@ Command:
 .\.venv\Scripts\python.exe -c "from services.detection_engine.benchmark import benchmark_pipeline; import json; print(json.dumps(benchmark_pipeline(flows=200), indent=2, sort_keys=True))"
 ```
 
-Results:
+Real output:
 
 ```json
 {
   "anomalies": 107,
-  "available_ram_gb": 0.6938705444335938,
+  "available_ram_gb": 0.7667617797851562,
   "backpressure_drops": 0,
   "candidates": 0,
-  "cold_model_load_seconds": 1.6984572999999727,
-  "elapsed_seconds": 58.93370700000014,
+  "cold_model_load_seconds": 2.0580396999994264,
+  "elapsed_seconds": 6.962244400001509,
   "flows_requested": 200,
-  "inference_latency_mean_ms": 15.394144499973663,
-  "inference_latency_p50_ms": 14.646899999206653,
-  "inference_latency_p95_ms": 20.096399999602,
+  "inference_latency_mean_ms": 21.88169299995934,
+  "inference_latency_p50_ms": 20.755799998369184,
+  "inference_latency_p95_ms": 27.701600000000326,
   "malicious": 0,
   "processed": 200,
   "queue_backlog_at_start": 200,
-  "queue_lag_mean_ms": 29879.941154999997,
-  "queue_lag_p95_ms": 55859.06,
+  "queue_lag_mean_ms": 3603.6674199999998,
+  "queue_lag_p95_ms": 6627.500999999999,
   "rare_blocked": 0,
   "redis_backend": "fakeredis",
-  "throughput_flows_per_sec": 3.393643640981205,
+  "throughput_flows_per_sec": 28.72636875544855,
   "uncertain": 23
 }
 ```
 
+Corrected before-profile (cProfile, cumulative):
+
+- Total: **20.591 s** including cold imports/model load.
+- `core/streams.py:250(process)`: **15.128 s**.
+- `services/detection_engine/engine.py:166(process_event)`: **14.989 s**.
+- `ml/predict.py:130(predict_single)`: **11.786 s** (one model call per flow).
+- `engine.py:318(_persist)`: **2.546 s** (one SQLite commit per flow).
+- Model load: **3.001 s**.
+
+### After (batched inference and one commit per batch)
+
+Same command as above, same 200 rows. Real output:
+
+```json
+{
+  "anomalies": 107,
+  "available_ram_gb": 0.7437858581542969,
+  "backpressure_drops": 0,
+  "candidates": 0,
+  "cold_model_load_seconds": 2.1300503999991633,
+  "elapsed_seconds": 0.9674868999991304,
+  "flows_requested": 200,
+  "inference_latency_mean_ms": 1.2410670000099344,
+  "inference_latency_p50_ms": 0.8479281249833548,
+  "inference_latency_p95_ms": 2.348243750020629,
+  "malicious": 0,
+  "processed": 200,
+  "processing_mode": "batched",
+  "queue_backlog_at_start": 200,
+  "queue_lag_mean_ms": 578.997415,
+  "queue_lag_p95_ms": 856.015,
+  "rare_blocked": 0,
+  "redis_backend": "fakeredis",
+  "stream_batch_size": 32,
+  "throughput_flows_per_sec": 206.72114526840596,
+  "uncertain": 23
+}
+```
+
+Focused after-profile (cProfile, cumulative, 7.644 s total including cold load):
+
+| Component | Calls | Cumulative time |
+|---|---:|---:|
+| `_persist_batch` / `_write_detection` | 7 / 200 | 0.823 s / 0.776 s |
+| Redis `execute_command` (fakeredis) | 1423 | 0.571 s |
+| `predict_batch` | 7 | 0.442 s |
+| Redis `xadd` (client/fakeredis) | 400 | 0.219 s / 0.047 s |
+| Random Forest `predict_proba` | 7 | 0.172 s |
+| Isolation Forest `score_samples` | 7 | 0.162 s |
+| `json.dumps` | 800 | 0.055 s |
+| `EventModel.to_stream_fields` | 400 | 0.050 s |
+
 Interpretation:
 
-- Inference itself is about **15 ms/flow** on this machine, but end-to-end
-  throughput is only **3.39 flows/s** because the benchmark includes SQLite
-  `NetworkFlow`/`Detection` persistence and two Redis-stream publishes per
-  event. These numbers are not a Redis Server benchmark.
-- Queue lag is large because the harness intentionally publishes all 200 events
-  before consuming them. The reported lag is `processing_time - event_creation_time`,
-  i.e. time waiting in the backlog, not model runtime. The initial backlog was
-  200 flows.
-- The machine has only about **0.69 GB available RAM** during the run (7.75 GB
-  total, >90% used). This 8 GB constraint limits throughput, test parallelism,
-  and any attempt to run Docker Redis; results should not be extrapolated to a
-  production host.
-- Cold model load (checksum verification plus artifact deserialization) took
-  **1.70 s** and was excluded from the timing loop but reported separately.
+- Throughput improved from **28.73** to **206.72 flows/s** on the same rows
+  (about **7.2x**), and mean inference time fell from **21.88 ms** to
+  **1.24 ms** by amortizing model calls over stream batches.
+- The model, saved feature order, and verdict logic were not changed. The batch
+  path reuses the existing `predict_batch()` and only changes how rows are
+  grouped.
+- Event serialization is not a bottleneck (0.050 s for 400 stream fields in
+  the profiled run). Redis/fakeredis command overhead and DB writes remain the
+  larger non-model costs.
+- Batching adds one commit per stream batch instead of one commit per event while
+  preserving per-event validation failures, retries, and dead-lettering.
+- These numbers use fakeredis and SQLite on an 8 GB host with roughly
+  **0.7–1.1 GB available RAM** during runs. They are not Redis Server, network,
+  disk, or production-traffic benchmarks. **Real traffic can exceed this
+  measured rate**, and real Redis latency/persistence will differ.
+
+### Equivalence and isolation tests
+
+- `test_batch_results_match_single_flow_results_on_same_rows` compares verdict,
+  predicted label, confidence, anomaly score, top features, and detection row id
+  for single-flow and batch processing of the same held-out rows.
+- `test_batch_dead_letters_one_bad_flow_without_dropping_valid_flows` publishes
+  one contract-violating flow between two valid flows. After three batch polls,
+  the valid flows are processed/persisted and only the bad flow is dead-lettered.
+- `test_consumer_process_batch_keeps_per_message_outcomes` verifies success,
+  retry, and pending-count behavior at the stream layer.
+
+## Queue lag
+
+The earlier `29.88 s` queue-lag figure is an **artifact of pre-queuing all 200
+events before consuming**. It measured deliberate backlog/wait time, not live
+latency. The final concurrent measurement runs a fixed-rate producer at
+20 flows/s while the consumer runs in a separate thread.
+
+Command:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from services.detection_engine.benchmark import benchmark_concurrent_queue_lag; import json; print(json.dumps(benchmark_concurrent_queue_lag(flows=200, rate_flows_per_sec=20.0), indent=2, sort_keys=True))"
+```
+
+Real output:
+
+```json
+{
+  "anomalies": 107,
+  "available_ram_gb": 0.7619400024414062,
+  "backpressure_drops": 0,
+  "candidates": 0,
+  "consumer_elapsed_seconds": 15.72258309999961,
+  "flows_requested": 200,
+  "inference_latency_mean_ms": 21.904449500007104,
+  "inference_latency_p50_ms": 20.799699999770382,
+  "inference_latency_p95_ms": 28.61789999951725,
+  "malicious": 0,
+  "processed": 200,
+  "producer_consumer_mode": "concurrent",
+  "producer_elapsed_seconds": 15.704714499999682,
+  "queue_lag_mean_ms": 30.12238,
+  "queue_lag_p95_ms": 45.03,
+  "rare_blocked": 0,
+  "rate_flows_per_sec": 20.0,
+  "redis_backend": "fakeredis",
+  "stream_length_at_end": 200,
+  "uncertain": 23
+}
+```
+
+Report this concurrent lag (**30.12 ms mean, 45.03 ms p95**) instead of the
+pre-queued artifact. `stream_length_at_end=200` is retained acked stream entries
+in Redis Streams, not a backlog. Inference remains near single-flow latency here
+because a 20 flows/s producer usually gives the consumer one item per poll.
 
 ## Verification
 
-The six tool commands were run in a randomly generated order:
-`mypy → ruff → pytest → black → pip-audit → bandit`.
+The six commands were run in this randomly generated order after all code
+changes: `pytest -> pip-audit -> bandit -> mypy -> ruff -> black`.
+
+### pytest
+
+Command: `.\.venv\Scripts\python.exe -m pytest -q`
+
+```text
+........................................................................ [ 33%]
+................................ssss.................................... [ 66%]
+........................................................................ [100%]
+212 passed, 4 skipped in 134.71s (0:02:14)
+```
+
+Exact skipped tests:
+
+- `tests/integration/test_ml_postgres.py::test_registry_lifecycle_on_postgres`
+  — skipped because `AI_IDS_TEST_DATABASE_URL` is not set.
+- `tests/integration/test_redis_streams.py::test_real_redis_consumer_group_and_batch_acks`
+  — skipped because `AI_IDS_TEST_REDIS_URL` is not set / no real Redis is reachable.
+- `tests/integration/test_redis_streams.py::test_real_redis_retries_then_dead_letters_one_event`
+  — same reason.
+- `tests/integration/test_redis_streams.py::test_real_redis_backpressure_on_stream_length`
+  — same reason.
+
+No tests were deselected in the final run. The formerly deselected Phase 4
+smoke test passed earlier in this review and is included in the 212 passes.
+
+### pip-audit
+
+Command: `.\.venv\Scripts\python.exe -m pip_audit`
+
+```text
+No known vulnerabilities found
+```
+
+### bandit
+
+Command: `.\.venv\Scripts\python.exe -m bandit -r core ml services prevention capture utils -ll`
+
+```text
+[main]	INFO	profile include tests: None
+[main]	INFO	profile exclude tests: None
+[main]	INFO	cli include tests: None
+[main]	INFO	cli exclude tests: None
+[main]	INFO	running on Python 3.13.1
+Working... ---------------------------------------- 100% 0:00:01
+Run started:2026-11-20 20:14:02.787848+00:00
+
+Test results:
+	No issues identified.
+
+Code scanned:
+	Total lines of code: 8981
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 3
+		Medium: 0
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 0
+		Medium: 0
+		High: 3
+Files skipped (0):
+```
 
 ### mypy
 
@@ -125,101 +337,13 @@ Command: `.\.venv\Scripts\python.exe -m ruff check .`
 All checks passed!
 ```
 
-### pytest (first full run)
-
-Command: `.\.venv\Scripts\python.exe -m pytest -q`
-
-```text
-F....s.................................................................. [ 34%]
-........................................................................ [ 68%]
-..................................................................       [100%]
-================================== FAILURES ===================================
-_______________ test_natural_benign_fpr_scores_raw_benign_rows ________________
-...
-E           MemoryError: memory guard triggered for train-smoke-20261120T193002: available RAM 0.50 GB < 0.50 GB minimum
-...
-FAILED tests/unit/ml/test_train_evaluate_smoke.py::test_natural_benign_fpr_scores_raw_benign_rows
-1 failed, 208 passed, 1 skipped in 96.31s (0:01:36)
-```
-
-This is a pre-existing Phase 4 training-smoke test whose memory guard refused
-to run at `0.50 GB` available RAM. It is an environment limitation, not a Phase 5
-failure; no training was retried.
-
-### pytest (randomized rerun, memory-heavy test deselected)
-
-Command:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest --randomly-seed=568525788 --deselect=tests/unit/ml/test_train_evaluate_smoke.py::test_natural_benign_fpr_scores_raw_benign_rows -q
-```
-
-```text
-s....................................................................... [ 34%]
-........................................................................ [ 68%]
-.................................................................        [100%]
-208 passed, 1 skipped, 1 deselected in 96.55s (0:01:36)
-```
-
-Phase 5 test groups included in that result:
-
-- `tests/unit/capture/test_flow_meter.py` — hand-built Scapy packets,
-  bidirectional counts, flags, IAT, headers, timeouts, finite values, and
-  feature-order parity with the saved 77-feature list.
-- `tests/unit/capture/test_sniffer.py` — admin refusal, interface selection,
-  capture stats and drop counters; no live capture socket opened.
-- `tests/unit/capture/test_replay_simulator.py` — test-only indices, `SIMULATION`
-  tag, source labels, speed/limit/backpressure behavior.
-- `tests/unit/core/test_events.py` — strict schemas, verdicts, dry-run candidate.
-- `tests/unit/services/test_streams.py` — consumer groups, retries, dead-letter,
-  acknowledgements, and backpressure with fakeredis.
-- `tests/unit/services/test_detection_engine.py` — real active model E2E in
-  simulation mode, `Detection` row with model version, feature enforcement,
-  rare-class gating, and active-pointer/feature-file byte comparison before and
-  after.
-
 ### black
 
 Command: `.\.venv\Scripts\python.exe -m black --check .`
 
 ```text
 All done! ✨ 🍰 ✨
-80 files would be left unchanged.
-```
-
-### pip-audit
-
-Command: `.\.venv\Scripts\python.exe -m pip_audit`
-
-```text
-No known vulnerabilities found
-```
-
-### bandit
-
-Command: `.\.venv\Scripts\python.exe -m bandit -r core ml services prevention capture utils -ll`
-
-```text
-Test results:
-	No issues identified.
-
-Code scanned:
-	Total lines of code: 8592
-	Total lines skipped (#nosec): 0
-	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
-
-Run metrics:
-	Total issues (by severity):
-		Undefined: 0
-		Low: 3
-		Medium: 0
-		High: 0
-	Total issues (by confidence):
-		Undefined: 0
-		Low: 0
-		Medium: 0
-		High: 3
-Files skipped (0):
+81 files would be left unchanged.
 ```
 
 ## Verified / Written but unverified / Skipped
@@ -233,19 +357,26 @@ Files skipped (0):
   and finite 77-feature output using hand-built Scapy packets.
 - Replay streams only held-out TEST rows and tags every event `SIMULATION`.
 - Redis stream groups, idempotent group creation, retries, dead-letter, acks,
-  and backpressure using fakeredis.
+  and backpressure using fakeredis, including the new batch path.
+- Batch predictions equal single-flow predictions on the same held-out rows.
+- One bad batch event is retried/dead-lettered while valid events still process.
 - Detection engine E2E in simulation mode: `Detection` row persisted with
   `model_version`; all four verdicts are representable; low-confidence and
   rare-class gates behave as documented.
 - Simulation prevention candidates are always dry-run and non-blocking.
-- ruff, black, mypy, bandit, pip-audit, and the non-training pytest suite pass.
+- Phase 4 training-smoke test passes at 1.1575 GB available RAM; no guard change.
+- Throughput improved from 28.73 to 206.72 flows/s on the same 200 TEST rows.
+- ruff, black, mypy, bandit, pip-audit, and full pytest pass.
 
 ### Written but unverified
 
-- Live Scapy/Npcap capture on an elevated Windows host with a real NIC: code and
-  unit tests exist, but no privileged live capture was started here.
+- Live Scapy/Npcap capture on an elevated Windows host with a real NIC: manual
+  steps are in `docs/live-capture-test.md`, but no privileged live capture was
+  started here. Status remains **Written but unverified** until you confirm.
 - Real Redis Server consumer-group concurrency, `XCLAIM`/reclaim under consumer
-  crashes, and production stream latency: only fakeredis was exercised.
+  crashes, and production stream latency: the integration test exists and
+  auto-skips when `AI_IDS_TEST_REDIS_URL` is unset or Redis is unreachable, but
+  it was not run against a real Redis Server.
 - End-to-end dashboard display of ground-truth vs prediction after detection:
   events contain `source_label`/`source_index`, but no Phase 5 UI was requested.
 - Live-mode accuracy against CICFlowMeter-derived training features: no live
@@ -253,32 +384,38 @@ Files skipped (0):
 
 ### Skipped
 
-- Real Redis via Docker Compose integration. Available RAM was measured at
-  `0.6079 GB` at Phase 5 start and about `0.69 GB` during the benchmark; Docker
-  Redis was not started because the 8 GB host is already above 92% memory use.
+- Real Redis via container: available RAM was measured at **1.0401 GB** and
+  approval was explicitly declined. No Docker/Redis process was started; the
+  real-Redis item remains **UNVERIFIED**.
 - Any training, retraining, promotion, rollback, or active-model change.
 - Phase 6 prevention/firewall implementation and active blocking.
 - CICFlowMeter installation/comparison and any claim of feature parity.
 
-## Risks
+## Pending items and risks
 
-1. **Feature distribution shift:** live header-derived approximations can differ
+1. **Live capture confirmation:** run `docs/live-capture-test.md` and report the
+   interface, BPF filter, flows published, detection count, verdicts, and any
+   warnings. Until then, live capture is unverified.
+2. **Real Redis confirmation:** set `AI_IDS_TEST_REDIS_URL` and run
+   `tests/integration/test_redis_streams.py` when approved; it covers consumer
+   groups, batch acks, retries/dead-letter, and backpressure.
+3. **Feature distribution shift:** live header-derived approximations can differ
    materially from CICFlowMeter values, especially bulk, active/idle, subflow,
    header-length, and segment-size features. Accuracy on live traffic is
    unverified and may be lower than held-out CICIDS test metrics.
-2. **Low-support classes:** `Heartbleed`, `Infiltration`, and
+4. **Low-support classes:** `Heartbleed`, `Infiltration`, and
    `Web Attack - SQL Injection` have fewer than 20 test samples in the active
    model metrics. Predictions for these classes are unreliable and are blocked
    from candidates without the explicit operator flag.
-3. **Memory pressure:** at roughly 0.5–0.7 GB available, the pre-existing
-   Phase 4 smoke test trips its 0.50 GB guard. Production-like throughput and
-   real Redis were not measurable here.
-4. **fakeredis vs Redis Server:** fakeredis validates contract logic but not real
+5. **Memory pressure:** this 8 GB host ran at roughly **0.7–1.1 GB available**
+   during the review. Production-like throughput and real Redis were not
+   measurable here, and real traffic can exceed the measured rate.
+6. **fakeredis vs Redis Server:** fakeredis validates contract logic but not real
    network, persistence, consumer failover, or `XPENDING` behavior under load.
-5. **Process-local retry counts:** after a consumer restart, pending messages are
+7. **Process-local retry counts:** after a consumer restart, pending messages are
    retried but the attempt counter resets. A future phase should persist attempt
    metadata or use XPENDING delivery counts.
-6. **Npcap privilege requirement:** without elevation, the sniffer refuses to
+8. **Npcap privilege requirement:** without elevation, the sniffer refuses to
    start by design; this is intentional and was unit-tested via monkeypatch.
-7. **Simulation lag methodology:** all events were queued before processing, so
-   the reported queue lag is dominated by deliberate backlog, not service time.
+9. **Benchmark scope:** the pre-queued lag figure was an artifact; the concurrent
+   figure is still a local fakeredis/SQLite measurement at a fixed 20 flows/s.

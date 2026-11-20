@@ -63,7 +63,7 @@ def run_detection_engine(
     )
     try:
         while not stop.is_set():
-            consumer.process(engine.handle)
+            consumer.process_batch(engine.handle_batch)
     finally:
         if owns_client:
             close = getattr(client, "close", None)

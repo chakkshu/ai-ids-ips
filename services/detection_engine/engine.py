@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import statistics
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -162,6 +162,206 @@ class DetectionEngine:
         """StreamConsumer callback; exceptions trigger retry/dead-letter."""
 
         self.process_event(payload)
+
+    def handle_batch(
+        self, items: Sequence[tuple[dict[str, Any], str]]
+    ) -> dict[str, BaseException | None]:
+        """Batch callback for :class:`StreamConsumer.process_batch`.
+
+        Each payload is validated independently. Valid payloads share one model
+        batch call and one database commit; errors are returned per message id
+        so the stream helper can retry or dead-letter only the failed event.
+        """
+
+        results = self.process_events([payload for payload, _ in items])
+        if len(results) != len(items):
+            raise RuntimeError(
+                f"batch result count {len(results)} does not match {len(items)}"
+            )
+        return {
+            message_id: result if isinstance(result, BaseException) else None
+            for (_, message_id), result in zip(items, results)
+        }
+
+    def process_events(
+        self, payloads: Sequence[dict[str, Any]]
+    ) -> list[DetectionEvent | BaseException]:
+        """Process a stream batch while isolating per-event failures."""
+
+        if not payloads:
+            return []
+
+        bundle = self.cache.get()
+        expected = list(bundle.feature_names)
+        rare_classes = self.low_support_classes(bundle.version)
+        prepared: list[tuple[int, RawFlowEvent, dict[str, float]]] = []
+        failures: dict[int, BaseException] = {}
+
+        for index, payload in enumerate(payloads):
+            try:
+                event = RawFlowEvent.model_validate(payload)
+                missing = [name for name in expected if name not in event.features]
+                extra = [name for name in event.features if name not in expected]
+                if missing or extra:
+                    raise ValueError(
+                        "feature contract violation: "
+                        f"missing={missing}, extra={extra}, expected={expected}"
+                    )
+                features = {name: float(event.features[name]) for name in expected}
+            except Exception as exc:  # noqa: BLE001 - per-event dead-letter boundary
+                failures[index] = exc
+            else:
+                prepared.append((index, event, features))
+
+        successes: dict[int, DetectionEvent] = {}
+        if prepared:
+            started = time.perf_counter()
+            try:
+                predictions = bundle.predict_batch(
+                    [features for _, _, features in prepared], top_k=3
+                )
+                if len(predictions) != len(prepared):
+                    raise RuntimeError(
+                        "model batch returned an unexpected number of predictions"
+                    )
+            except Exception as exc:  # noqa: BLE001 - batch inference boundary
+                for index, _, _ in prepared:
+                    failures[index] = exc
+                predictions = []
+            else:
+                batch_latency_ms = (
+                    (time.perf_counter() - started) * 1000.0 / len(prepared)
+                )
+
+            if predictions:
+                persistence_inputs: list[
+                    tuple[RawFlowEvent, Any, Mapping[str, float], float, str]
+                ] = []
+                metadata: list[tuple[int, RawFlowEvent, Any, float, bool, bool]] = []
+                for (index, event, features), prediction in zip(prepared, predictions):
+                    queue_lag_ms = max(
+                        (utc_now() - _aware_timestamp(event.timestamp)).total_seconds()
+                        * 1000.0,
+                        0.0,
+                    )
+                    rare_flag = prediction.predicted_class in rare_classes
+                    low_confidence = (
+                        prediction.verdict == "uncertain"
+                        or prediction.confidence < bundle.confidence_threshold
+                    )
+                    persistence_inputs.append(
+                        (event, prediction, features, batch_latency_ms, bundle.version)
+                    )
+                    metadata.append(
+                        (
+                            index,
+                            event,
+                            prediction,
+                            queue_lag_ms,
+                            rare_flag,
+                            low_confidence,
+                        )
+                    )
+
+                try:
+                    detection_ids = self._persist_batch(persistence_inputs)
+                    if len(detection_ids) != len(metadata):
+                        raise RuntimeError(
+                            "batch persistence returned an unexpected row count"
+                        )
+                except Exception as exc:  # noqa: BLE001 - batch DB boundary
+                    for index, _, _ in prepared:
+                        failures[index] = exc
+                else:
+                    for detection_id, (
+                        index,
+                        event,
+                        prediction,
+                        queue_lag_ms,
+                        rare_flag,
+                        low_confidence,
+                    ) in zip(detection_ids, metadata):
+                        detection_event = DetectionEvent(
+                            event_id=new_event_id(
+                                "detection",
+                                seed=f"{event.event_id}:{bundle.version}",
+                            ),
+                            timestamp=utc_now(),
+                            source=event.source,
+                            tags=list(event.tags),
+                            flow_id=event.flow_id,
+                            model_version=bundle.version,
+                            predicted_label=prediction.predicted_class,
+                            verdict=prediction.verdict,  # type: ignore[arg-type]
+                            confidence_score=float(prediction.confidence),
+                            anomaly_score=float(prediction.anomaly_score),
+                            is_malicious=prediction.verdict == "known attack",
+                            is_anomaly=prediction.verdict == "anomaly",
+                            inference_latency_ms=batch_latency_ms,
+                            queue_lag_ms=queue_lag_ms,
+                            top_features=[
+                                (name, float(value))
+                                for name, value in prediction.top_features
+                            ],
+                            source_label=event.source_label,
+                            rare_class_flag=rare_flag,
+                            low_confidence_flag=low_confidence,
+                            allow_rare_class_candidate=event.allow_rare_class_candidate,
+                            detection_id=detection_id,
+                        )
+                        try:
+                            self._publish(
+                                detection_event, self.detections_stream, "detection"
+                            )
+                            candidate_published = False
+                            rare_blocked = False
+                            if self._qualifies_for_candidate(
+                                event, prediction, low_confidence, rare_flag
+                            ):
+                                candidate = self._build_candidate(
+                                    event, detection_event, prediction, rare_flag
+                                )
+                                self._publish(
+                                    candidate,
+                                    self.prevention_stream,
+                                    "prevention candidate",
+                                )
+                                candidate_published = True
+                            elif (
+                                rare_flag
+                                and not event.allow_rare_class_candidate
+                                and prediction.verdict == "known attack"
+                            ):
+                                rare_blocked = True
+                                logger.warning(
+                                    "Rare-class prediction %r was not promoted: "
+                                    "explicit flag required",
+                                    prediction.predicted_class,
+                                )
+                        except Exception as exc:  # noqa: BLE001 - publish boundary
+                            failures[index] = exc
+                            continue
+
+                        successes[index] = detection_event
+                        self.metrics.record(
+                            prediction,
+                            latency_ms=batch_latency_ms,
+                            queue_lag_ms=queue_lag_ms,
+                            candidate_published=candidate_published,
+                            rare_blocked=rare_blocked,
+                        )
+
+        results: list[DetectionEvent | BaseException] = []
+        for index in range(len(payloads)):
+            if index in failures:
+                results.append(failures[index])
+            elif index in successes:
+                results.append(successes[index])
+            else:
+                results.append(
+                    RuntimeError(f"payload at position {index} was not processed")
+                )
+        return results
 
     def process_event(self, payload: dict[str, Any]) -> DetectionEvent:
         """Validate, infer, persist and publish one raw-flow event."""
@@ -323,50 +523,82 @@ class DetectionEngine:
         latency_ms: float,
         model_version: str,
     ) -> int:
-        timestamp = _aware_timestamp(event.timestamp)
-        with self.session_factory() as session:
-            flow = (
-                session.query(NetworkFlow)
-                .filter(NetworkFlow.flow_id == event.flow_id)
-                .order_by(NetworkFlow.id.desc())
-                .first()
-            )
-            if flow is None:
-                flow = NetworkFlow(flow_id=event.flow_id)
-                session.add(flow)
-            flow.timestamp = timestamp
-            flow.src_ip = event.src_ip
-            flow.src_port = event.src_port
-            flow.dst_ip = event.dst_ip
-            flow.dst_port = event.dst_port
-            flow.protocol = event.protocol
-            flow.duration = float(features.get("Flow Duration", 0.0))
-            flow.total_fwd_packets = int(features.get("Total Fwd Packets", 0.0))
-            flow.total_bwd_packets = int(features.get("Total Backward Packets", 0.0))
-            flow.total_fwd_bytes = int(features.get("Total Length of Fwd Packets", 0.0))
-            flow.total_bwd_bytes = int(features.get("Total Length of Bwd Packets", 0.0))
-            flow.flow_bytes_per_sec = float(features.get("Flow Bytes/s", 0.0))
-            flow.flow_packets_per_sec = float(features.get("Flow Packets/s", 0.0))
-            flow.features_json = json.dumps(dict(features), sort_keys=True)
-            session.flush()
+        return self._persist_batch(
+            [(event, prediction, features, latency_ms, model_version)]
+        )[0]
 
-            detection = (
-                session.query(Detection).filter(Detection.flow_id == flow.id).first()
-            )
-            if detection is None:
-                detection = Detection(flow_id=flow.id)
-                session.add(detection)
-            detection.timestamp = timestamp
-            detection.predicted_label = prediction.predicted_class
-            detection.is_malicious = prediction.verdict == "known attack"
-            detection.confidence_score = float(prediction.confidence)
-            detection.is_anomaly = prediction.verdict == "anomaly"
-            detection.anomaly_score = float(prediction.anomaly_score)
-            detection.top_features_json = json.dumps(
-                [[name, float(value)] for name, value in prediction.top_features]
-            )
-            detection.model_version = model_version
-            detection.inference_latency_ms = latency_ms
-            session.flush()
-            detection_id = int(detection.id)
-        return detection_id
+    def _persist_batch(
+        self,
+        entries: Sequence[tuple[RawFlowEvent, Any, Mapping[str, float], float, str]],
+    ) -> list[int]:
+        """Persist one stream batch in a single database transaction."""
+
+        detection_ids: list[int] = []
+        with self.session_factory() as session:
+            for event, prediction, features, latency_ms, model_version in entries:
+                detection_ids.append(
+                    self._write_detection(
+                        session,
+                        event,
+                        prediction,
+                        features,
+                        latency_ms,
+                        model_version,
+                    )
+                )
+        return detection_ids
+
+    @staticmethod
+    def _write_detection(
+        session: Any,
+        event: RawFlowEvent,
+        prediction: Any,
+        features: Mapping[str, float],
+        latency_ms: float,
+        model_version: str,
+    ) -> int:
+        timestamp = _aware_timestamp(event.timestamp)
+        flow = (
+            session.query(NetworkFlow)
+            .filter(NetworkFlow.flow_id == event.flow_id)
+            .order_by(NetworkFlow.id.desc())
+            .first()
+        )
+        if flow is None:
+            flow = NetworkFlow(flow_id=event.flow_id)
+            session.add(flow)
+        flow.timestamp = timestamp
+        flow.src_ip = event.src_ip
+        flow.src_port = event.src_port
+        flow.dst_ip = event.dst_ip
+        flow.dst_port = event.dst_port
+        flow.protocol = event.protocol
+        flow.duration = float(features.get("Flow Duration", 0.0))
+        flow.total_fwd_packets = int(features.get("Total Fwd Packets", 0.0))
+        flow.total_bwd_packets = int(features.get("Total Backward Packets", 0.0))
+        flow.total_fwd_bytes = int(features.get("Total Length of Fwd Packets", 0.0))
+        flow.total_bwd_bytes = int(features.get("Total Length of Bwd Packets", 0.0))
+        flow.flow_bytes_per_sec = float(features.get("Flow Bytes/s", 0.0))
+        flow.flow_packets_per_sec = float(features.get("Flow Packets/s", 0.0))
+        flow.features_json = json.dumps(dict(features), sort_keys=True)
+        session.flush()
+
+        detection = (
+            session.query(Detection).filter(Detection.flow_id == flow.id).first()
+        )
+        if detection is None:
+            detection = Detection(flow_id=flow.id)
+            session.add(detection)
+        detection.timestamp = timestamp
+        detection.predicted_label = prediction.predicted_class
+        detection.is_malicious = prediction.verdict == "known attack"
+        detection.confidence_score = float(prediction.confidence)
+        detection.is_anomaly = prediction.verdict == "anomaly"
+        detection.anomaly_score = float(prediction.anomaly_score)
+        detection.top_features_json = json.dumps(
+            [[name, float(value)] for name, value in prediction.top_features]
+        )
+        detection.model_version = model_version
+        detection.inference_latency_ms = latency_ms
+        session.flush()
+        return int(detection.id)
