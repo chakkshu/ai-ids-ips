@@ -258,6 +258,8 @@ def cmd_train(args: argparse.Namespace) -> int:
     ]
     if args.memory_log is not None:
         argv.extend(["--memory-log", str(args.memory_log)])
+    if args.work_dir is not None:
+        argv.extend(["--work-dir", str(args.work_dir)])
     if args.version:
         argv.extend(["--version", args.version])
     if args.no_register:
@@ -556,6 +558,7 @@ def main() -> int:
     )
     train_p.add_argument("--processed-dir", required=True)
     train_p.add_argument("--registry-root", default=settings.ML_MODEL_REGISTRY_PATH)
+    train_p.add_argument("--work-dir", default=None)
     train_p.add_argument("--version", default=None)
     train_p.add_argument("--seed", type=int, default=settings.ML_RANDOM_SEED)
     train_p.add_argument("--n-iter", type=int, default=8)
