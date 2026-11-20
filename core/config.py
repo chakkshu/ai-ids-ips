@@ -11,7 +11,7 @@ import secrets
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -56,12 +56,32 @@ class Settings(BaseSettings):
     REDIS_DB: int = 0
     REDIS_URL: str | None = None
 
+    # Redis Stream Contract (Phase 5)
+    # ``raw-flows`` is the sensor -> detection-engine ingress. The detection
+    # and prevention streams are publish-only in this phase; no firewall
+    # action is implemented.
+    STREAM_RAW_FLOWS: str = "raw-flows"
+    STREAM_DETECTIONS: str = "detections:stream"
+    STREAM_PREVENTION: str = "prevention:action"
+    STREAM_DEAD_LETTER: str = "raw-flows:dead-letter"
+    STREAM_DETECTIONS_DEAD_LETTER: str = "detections:stream:dead-letter"
+    STREAM_CONSUMER_GROUP: str = "detection-engine"
+    STREAM_CONSUMER_NAME: str = "detection-worker-1"
+    STREAM_BATCH_SIZE: int = 32
+    STREAM_BLOCK_MS: int = 1000
+    STREAM_MAXLEN: int = 10000
+    STREAM_MAX_PENDING: int = 512
+    STREAM_MAX_ATTEMPTS: int = 3
+
     # Network Packet Capture (Sensor) Settings
     SENSOR_INTERFACE: str = "auto"
     SENSOR_BPF_FILTER: str = "ip"
     SENSOR_FLOW_TIMEOUT_ACTIVE: int = 120  # seconds
     SENSOR_FLOW_TIMEOUT_IDLE: int = 30  # seconds
     SENSOR_SIMULATION_MODE: bool = True
+    # Optional canonical toggle. When unset, SENSOR_SIMULATION_MODE wins so
+    # the Phase 1 setting remains a valid live/simulation switch.
+    CAPTURE_MODE: Literal["live", "simulation"] | None = None
 
     # Prevention Engine Settings
     PREVENTION_MODE: Literal["dry_run", "active"] = "dry_run"
@@ -162,6 +182,42 @@ class Settings(BaseSettings):
             raise ValueError("APP_MASTER_KEK must be valid hexadecimal") from exc
         return clean_v
 
+    @model_validator(mode="after")
+    def reconcile_capture_mode(self) -> Settings:
+        """Keep the legacy boolean and canonical mode toggle consistent."""
+
+        if self.CAPTURE_MODE is None:
+            mode = "simulation" if self.SENSOR_SIMULATION_MODE else "live"
+            object.__setattr__(self, "CAPTURE_MODE", mode)
+        else:
+            object.__setattr__(
+                self, "SENSOR_SIMULATION_MODE", self.CAPTURE_MODE == "simulation"
+            )
+        return self
+
+    @field_validator(
+        "STREAM_BATCH_SIZE",
+        "STREAM_MAXLEN",
+        "STREAM_MAX_PENDING",
+        "STREAM_MAX_ATTEMPTS",
+    )
+    @classmethod
+    def validate_stream_limits(cls, v: int) -> int:
+        """Reject zero or negative stream/backpressure limits."""
+
+        if v <= 0:
+            raise ValueError("Stream limits must be positive integers")
+        return v
+
+    @field_validator("STREAM_BLOCK_MS")
+    @classmethod
+    def validate_stream_block(cls, v: int) -> int:
+        """Allow block=0 (non-blocking reads) but reject negative waits."""
+
+        if v < 0:
+            raise ValueError("STREAM_BLOCK_MS must be zero or greater")
+        return v
+
     @field_validator("PREVENTION_CONFIDENCE_THRESHOLD")
     @classmethod
     def validate_confidence(cls, v: float) -> float:
@@ -187,6 +243,8 @@ class Settings(BaseSettings):
         "TOTP_VALID_WINDOW",
         "RECOVERY_CODE_COUNT",
         "ML_RANDOM_SEED",
+        "SENSOR_FLOW_TIMEOUT_ACTIVE",
+        "SENSOR_FLOW_TIMEOUT_IDLE",
     )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:
@@ -202,6 +260,19 @@ class Settings(BaseSettings):
         if v < 0:
             raise ValueError("TRUSTED_PROXY_HOPS must be zero or greater")
         return v
+
+    def get_capture_mode(self) -> Literal["live", "simulation"]:
+        """Return the active capture mode from the Phase 1 settings."""
+
+        mode = self.CAPTURE_MODE or (
+            "simulation" if self.SENSOR_SIMULATION_MODE else "live"
+        )
+        return "simulation" if mode == "simulation" else "live"
+
+    def is_simulation_mode(self) -> bool:
+        """Return True when no live capture/firewall action may be performed."""
+
+        return self.get_capture_mode() == "simulation"
 
     def get_database_url(self) -> str:
         """Return canonical database URL."""
