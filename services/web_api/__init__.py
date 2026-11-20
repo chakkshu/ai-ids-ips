@@ -312,8 +312,10 @@ def create_app(
     from services.web_api.blueprints.auth import auth_bp
     from services.web_api.blueprints.dashboard import dashboard_bp
     from services.web_api.blueprints.health import health_bp
+    from services.web_api.blueprints.prevention import prevention_bp
     from services.web_api.blueprints.users import users_bp
 
+    app.register_blueprint(prevention_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)

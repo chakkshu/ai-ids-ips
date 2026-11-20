@@ -36,6 +36,9 @@ class Settings(BaseSettings):
         description="32-byte hexadecimal Key Encryption Key for AES-256-GCM envelope encryption",
     )
     APP_KEK_VERSION: str = "v1"
+    # JSON object mapping retired/current key IDs to 32-byte hex KEKs, e.g.
+    # '{"v1":"<64 hex>","v2":"<64 hex>"}'. Secrets are never logged.
+    APP_KEK_REGISTRY: str = "{}"
     AUDIT_HMAC_SECRET: str = Field(
         default="fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
         description="Secret key used for HMAC-SHA256 audit ledger hash chaining",
@@ -67,6 +70,9 @@ class Settings(BaseSettings):
     STREAM_DETECTIONS_DEAD_LETTER: str = "detections:stream:dead-letter"
     STREAM_CONSUMER_GROUP: str = "detection-engine"
     STREAM_CONSUMER_NAME: str = "detection-worker-1"
+    STREAM_PREVENTION_CONSUMER_GROUP: str = "prevention-engine"
+    STREAM_PREVENTION_CONSUMER_NAME: str = "prevention-worker-1"
+    STREAM_PREVENTION_DEAD_LETTER: str = "prevention:action:dead-letter"
     STREAM_BATCH_SIZE: int = 32
     STREAM_BLOCK_MS: int = 1000
     STREAM_MAXLEN: int = 10000
@@ -85,12 +91,24 @@ class Settings(BaseSettings):
 
     # Prevention Engine Settings
     PREVENTION_MODE: Literal["dry_run", "active"] = "dry_run"
+    # Real firewall changes require BOTH ``PREVENTION_MODE=active`` and this
+    # explicit opt-in, and are always forced back to dry-run in simulation mode.
+    PREVENTION_ALLOW_REAL_ENFORCEMENT: bool = False
+    PREVENTION_KILL_SWITCH: bool = False
     PREVENTION_REQUIRE_APPROVAL: bool = False
     PREVENTION_CONFIDENCE_THRESHOLD: float = 0.85
     PREVENTION_MIN_DETECTIONS: int = 2
     PREVENTION_WINDOW_SECONDS: int = 60
     PREVENTION_BLOCK_DURATION_MINUTES: int = 15
     PREVENTION_WHITELIST: str = "127.0.0.1/32,::1/128,192.168.1.1/32,10.0.0.1/32"
+    PREVENTION_PROTECTED_CIDRS: str = ""
+    PREVENTION_DEFAULT_GATEWAYS: str = ""
+    PREVENTION_ADMIN_IP: str | None = None
+    PREVENTION_DNS_SERVERS: str = ""
+    PREVENTION_RARE_CLASSES: str = (
+        "Heartbleed,Infiltration,SQL Injection,Web Attack - Sql Injection"
+    )
+    PREVENTION_ESCALATION_LADDER_MINUTES: str = "15,60,240,1440"
 
     # Machine Learning & MLOps
     ML_MODEL_REGISTRY_PATH: str = str(BASE_DIR / "ml" / "registry")
@@ -118,6 +136,15 @@ class Settings(BaseSettings):
     ALERT_NOTIFICATION_EMAIL: str | None = None
     SLACK_WEBHOOK_URL: str | None = None
     TEAMS_WEBHOOK_URL: str | None = None
+    ALERT_NOTIFICATION_MAX_ATTEMPTS: int = 3
+    ALERT_NOTIFICATION_RETRY_SECONDS: float = 2.0
+    ALERT_WEBHOOK_TIMEOUT_SECONDS: float = 3.0
+
+    # Threat Intelligence Settings (external providers are OFF unless a key
+    # and an explicit provider hostname are configured).
+    THREAT_INTEL_CACHE_TTL_SECONDS: int = 3600
+    THREAT_INTEL_TIMEOUT_SECONDS: float = 3.0
+    THREAT_INTEL_MAX_IMPORT_BYTES: int = 1_048_576
 
     # Password Hashing (Argon2id) - explicit, tunable parameters
     ARGON2_TIME_COST: int = 3
@@ -226,6 +253,30 @@ class Settings(BaseSettings):
             raise ValueError(
                 "PREVENTION_CONFIDENCE_THRESHOLD must be between 0.5 and 1.0"
             )
+        return v
+
+    @field_validator("PREVENTION_MIN_DETECTIONS")
+    @classmethod
+    def validate_min_detections(cls, v: int) -> int:
+        """A single prediction must never be enough to trigger a block."""
+
+        if v < 2:
+            raise ValueError("PREVENTION_MIN_DETECTIONS must be at least 2")
+        return v
+
+    @field_validator(
+        "PREVENTION_WINDOW_SECONDS",
+        "PREVENTION_BLOCK_DURATION_MINUTES",
+        "ALERT_NOTIFICATION_MAX_ATTEMPTS",
+        "THREAT_INTEL_CACHE_TTL_SECONDS",
+        "THREAT_INTEL_MAX_IMPORT_BYTES",
+    )
+    @classmethod
+    def validate_prevention_positive_int(cls, v: int) -> int:
+        """Reject non-positive prevention, alerting, and intel limits."""
+
+        if v <= 0:
+            raise ValueError("Prevention and alerting limits must be positive")
         return v
 
     @field_validator(

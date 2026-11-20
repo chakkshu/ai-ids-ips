@@ -119,6 +119,7 @@ class PreventionCandidateEvent(EventModel):
     event_type: Literal["prevention_candidate"] = "prevention_candidate"
     candidate_id: str = Field(min_length=1, max_length=128)
     detection_event_id: str = Field(min_length=1, max_length=128)
+    detection_id: int | None = Field(default=None, ge=1)
     flow_id: str = Field(min_length=1, max_length=128)
     src_ip: str = Field(min_length=1, max_length=45)
     dst_ip: str = Field(min_length=1, max_length=45)

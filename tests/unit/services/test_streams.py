@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import fakeredis
@@ -133,8 +134,8 @@ def test_consumer_process_batch_keeps_per_message_outcomes(client: Any) -> None:
         consumer.publish(_raw_event(event_id))
 
     def handler(
-        items: list[tuple[dict[str, Any], str]],
-    ) -> dict[str, BaseException | None]:
+        items: Sequence[tuple[dict[str, Any], str]],
+    ) -> Mapping[str, BaseException | None]:
         return {
             message_id: (
                 RuntimeError("bad flow") if payload["event_id"] == "flow-2" else None

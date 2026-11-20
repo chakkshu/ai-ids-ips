@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import tempfile
 import time
 from dataclasses import asdict, dataclass
@@ -109,7 +109,7 @@ def _git_commit() -> str | None:
     """Best-effort git SHA for reproducibility; never required for training."""
 
     try:
-        completed = subprocess.run(
+        completed = subprocess.run(  # nosec B603, B607
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,

@@ -486,6 +486,7 @@ class DetectionEngine:
                 "candidate", seed=f"{event.flow_id}:{detection_event.event_id}"
             ),
             detection_event_id=detection_event.event_id,
+            detection_id=detection_event.detection_id,
             flow_id=event.flow_id,
             src_ip=event.src_ip,
             dst_ip=event.dst_ip,

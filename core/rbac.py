@@ -24,6 +24,13 @@ class Permission(str, enum.Enum):
     USERS_MANAGE = "users:manage"
     MODELS_MANAGE = "models:manage"
     SELF_MANAGE = "self:manage"
+    PREVENTION_VIEW = "prevention:view"
+    PREVENTION_MANAGE = "prevention:manage"
+    ALERT_VIEW = "alerts:view"
+    ALERT_MANAGE = "alerts:manage"
+    THREAT_INTEL_VIEW = "threat-intel:view"
+    THREAT_INTEL_MANAGE = "threat-intel:manage"
+    KEYS_MANAGE = "keys:manage"
 
 
 ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
@@ -36,6 +43,13 @@ ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
             Permission.USERS_MANAGE,
             Permission.MODELS_MANAGE,
             Permission.SELF_MANAGE,
+            Permission.PREVENTION_VIEW,
+            Permission.PREVENTION_MANAGE,
+            Permission.ALERT_VIEW,
+            Permission.ALERT_MANAGE,
+            Permission.THREAT_INTEL_VIEW,
+            Permission.THREAT_INTEL_MANAGE,
+            Permission.KEYS_MANAGE,
         }
     ),
     UserRole.ANALYST: frozenset(
@@ -44,6 +58,10 @@ ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
             Permission.AUDIT_VIEW,
             Permission.AUDIT_VERIFY,
             Permission.SELF_MANAGE,
+            Permission.PREVENTION_VIEW,
+            Permission.ALERT_VIEW,
+            Permission.ALERT_MANAGE,
+            Permission.THREAT_INTEL_VIEW,
         }
     ),
     UserRole.VIEWER: frozenset(
@@ -51,6 +69,9 @@ ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
             Permission.DASHBOARD_VIEW,
             Permission.AUDIT_VIEW,
             Permission.SELF_MANAGE,
+            Permission.PREVENTION_VIEW,
+            Permission.ALERT_VIEW,
+            Permission.THREAT_INTEL_VIEW,
         }
     ),
 }

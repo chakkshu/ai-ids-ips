@@ -471,7 +471,12 @@ def main() -> int:
 
     # Web API
     api_p = subparsers.add_parser("web-api", help="Run Flask REST API & SOC Dashboard")
-    api_p.add_argument("--host", default="0.0.0.0", help="Binding host address")
+    # Operators may bind explicitly for container deployments.
+    api_p.add_argument(
+        "--host",
+        default="0.0.0.0",  # nosec B104
+        help="Binding host address",
+    )
     api_p.add_argument("--port", type=int, default=5000, help="Binding TCP port")
     api_p.set_defaults(func=cmd_web_api)
 
